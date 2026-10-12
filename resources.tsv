@@ -1,0 +1,9 @@
+# 이 Mac 에서 세션 여럿이 함께 다루는 제어 대상(전역 규약 §18, ~/.claude/tools/vmq/README.md).
+# 줄마다: <이름>	<그 대상이 있는 Mac 의 SSH 주소>	<역할, 쉼표로>. 탭으로 나눈다. 차례표 · 배정은 이 이름으로 한다.
+# 10.10.10.1 = Mac mini, 10.10.10.2 = Mac Studio(두 Mac 을 잇는 Thunderbolt 브리지).
+# 역할은 acquire 의 묶음에 @<역할> 로 적어 후보 묶음으로 쓴다(@server 는 역할 server 를 가진 대상 전부).
+# 대상을 더하거나 지우면 이 파일만 고친다. 그 대상을 다루는 프로젝트의 도구가 이 파일에서 이름 · Mac 을 읽는다.
+PoieveServer	10.10.10.2	server,poieve
+PoieveServer2	10.10.10.1	server,poieve
+PoieveClient	10.10.10.2	client,poieve
+PoieveClient2	10.10.10.1	poieve,setup

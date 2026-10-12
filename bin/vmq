@@ -1,0 +1,254 @@
+#!/bin/zsh
+# 제어 대상 큐(전역 규약 §18, ~/.claude/tools/vmq/README.md, 규칙 · 차례 파일 · 배정은 lib/vmq.zsh). 대상을 다루기 전에 차례를 받고,
+# 끝나면 놓는다. 차례가 없으면 그 대상을 다루는 프로젝트 도구(예: poieve 의 tools/vm.sh · tools/vm-ui.sh)가 거절한다.
+# 사용:
+#   vmq acquire [-w 초] [-l 설명] <묶음>…   차례를 받는다. 묶음마다 VM 하나를 받는다. 묶음은 VM 이름, 쉼표로 적은 후보
+#                                                      (PoieveServer,PoieveServer2), 역할(@server · @client) 중 하나다. 후보 중 먼저 비는
+#                                                      VM 을 받는다. 다른 소유자가 잡고 있으면 기다린다(기본 90초). 잡으면 종료 코드 0 이고
+#                                                      받은 VM 을 묶음 순서로 찍는다. 기다리다 시간이 다 되면 75 이고 차례는 남는다(같은
+#                                                      명령을 다시 실행해 이어서 기다린다). 기다리는 중에 다른 묶음으로 다시 실행하면 같은
+#                                                      순번으로 요청을 바꾼다
+#   vmq mine                             내가 잡은 VM 을 묶음 순서로 한 줄에 찍는다. 잡지 않았으면 종료 코드 1
+#   vmq release [<vm>…]                  내 차례를 지운다. VM 을 주면 그 VM 만 놓는다
+#   vmq status [<vm>…]                   VM 마다 잡은 소유자와 기다리는 소유자
+#   vmq run [-l 설명] <묶음>… -- <명령…>  차례를 잡을 때까지 기다린 뒤 명령을 실행하고, 이 명령이 받은 차례면 놓는다.
+#                                                      명령에는 받은 VM 이 환경 변수 VM_QUEUE_GRANTED(공백으로 나눈 목록)로 간다
+#   vmq force-release <vm>              그 VM 을 잡은 차례를 지운다. 사용자가 지시할 때만 쓴다
+#   vmq list                            대상 목록(이름 · Mac · 역할)
+#   vmq peek-check '<명령 한 줄>'        차례 없이 실행해도 되는 읽기인지 판별한다(종료 코드 0 · 1)
+# 소유자는 VM_QUEUE_OWNER, 없으면 CLAUDE_CODE_SESSION_ID. 설명은 -l 또는 VM_QUEUE_LABEL.
+# 종료 코드: 0 성공, 1 거절 · 오류, 2 사용법, 75 기다리는 중.
+set -uo pipefail
+source "${0:A:h:h}/lib/vmq.zsh"
+cmd=${1:-status}; (( $# )) && shift
+
+usage() { sed -n '2,22p' "${0:A}"; exit 2 }
+
+# 옵션: -w 초 · -l 설명. 나머지는 reply 에 남는다.
+wait_s=90 label=${VM_QUEUE_LABEL:-}
+parse() {
+  reply=()
+  while (( $# )); do
+    case $1 in
+    -w) wait_s=${2:?초}; shift 2 ;;
+    -l) label=${2:?설명}; shift 2 ;;
+    --) reply+=("$@"); return ;;
+    *) reply+=("$1"); shift ;;
+    esac
+  done
+}
+
+# 묶음들을 풀어 groups 에 둔다: expand_groups <묶음>…
+expand_groups() {
+  local g e
+  groups=()
+  for g in "$@"; do e=$(vmq_expand $g) || return 1; groups+=($e); done
+}
+
+# 잡은 VM 으로 묶음들을 채울 수 있는가: covers <잡은 VM 목록> <묶음>…
+covers() {
+  local held=$1 g vm used=() hit; shift
+  for g in "$@"; do
+    hit=
+    for vm in ${(s:,:)g}; do vmq_has "$held" $vm && (( ! ${used[(Ie)$vm]} )) && { hit=$vm; break }; done
+    [[ -n $hit ]] || return 1
+    used+=($hit)
+  done
+}
+
+# 차례를 만들거나 바꾼다: register <소유자> <묶음>… → 새로 만들었으면 0, 이미 있었으면 3, 거절이면 1
+# 잡은 뒤에는 바꾸지 않는다: 잡은 채 더 받으면 VM 마다의 순서가 어긋나 교착이 생길 수 있다. 기다리는 동안에는 같은 일련번호로 바꾼다.
+register() {
+  local owner=$1 vm k f seq rc=3 c all=()
+  shift
+  local need="$*"
+  for f in "$@"; do all+=(${(s:,:)f}); done
+  all=(${(u)all})
+  vmq_lock || return 1
+  {
+    vmq_sync $owner
+    k=$REPLY
+    if [[ -n $k && -n ${Q_held[$k]} ]]; then
+      if ! covers "${Q_held[$k]}" "$@"; then
+        print -u2 "제어 대상 큐: 이 소유자는 이미 ${Q_held[$k]} 를 잡았다. $need 가 필요하면 vmq release 한 뒤 함께 acquire 한다"
+        rc=1
+      fi
+    elif [[ -n $k ]]; then
+      if [[ ${Q_need[$k]} != $need ]]; then
+        c=$(vmq_field ${Q_file[$k]} created)
+        [[ -n $label ]] || label=$(vmq_field ${Q_file[$k]} label)
+        for vm in ${(ok)VMQ_HOST}; do
+          f="$VMQ_DIR/$vm/$k"
+          if (( ${all[(Ie)$vm]} )); then mkdir -p "$VMQ_DIR/$vm"; vmq_write $f $owner "$label" $c "$need"; else rm -f -- $f; fi
+        done
+        vmq_log "바꿈 $owner $need${label:+ ($label)} (순번 ${k%%-*} 그대로)"
+      fi
+    else
+      seq=$(( $(cat "$VMQ_DIR/.seq" 2>/dev/null || print 0) + 1 ))
+      print $seq > "$VMQ_DIR/.seq"
+      for vm in $all; do
+        mkdir -p "$VMQ_DIR/$vm"
+        vmq_write "$VMQ_DIR/$vm/${(l:10::0:)seq}-$owner" $owner "$label" $EPOCHSECONDS "$need"
+      done
+      vmq_log "등록 $owner $need${label:+ ($label)}"
+      rc=0
+    fi
+  } always { vmq_unlock }
+  return $rc
+}
+
+# 차례를 잡을 때까지 기다린다: hold <소유자> <제한 초(0 이면 끝없이)>. 잡으면 REPLY 에 받은 VM.
+hold() {
+  local owner=$1 limit=$2 got=0 lost=0 start=$EPOCHSECONDS told=0 k
+  while true; do
+    # 끝없이 기다리는 run 은 한 번 어디서 기다리는지 알린다(acquire 는 시간이 다 되면 알린다)
+    if (( limit == 0 && ! told && EPOCHSECONDS > start )); then waiting_line $owner >&2; told=1; fi
+    vmq_lock || return 1
+    {
+      vmq_sync $owner
+      k=$REPLY
+      if [[ -z $k ]]; then lost=1
+      elif [[ -n ${Q_held[$k]} ]]; then got=1; REPLY=${Q_held[$k]}
+      fi
+    } always { vmq_unlock }
+    (( lost )) && { print -u2 "제어 대상 큐: 차례가 사라졌다(만료 또는 강제로 놓음). 다시 acquire 한다"; return 1 }
+    (( got )) && return 0
+    (( limit > 0 && EPOCHSECONDS - start >= limit )) && return 75
+    sleep 2
+  done
+}
+
+waiting_line() {
+  local owner=$1 k vm g
+  vmq_lock || return 1
+  { vmq_scan; vmq_plan } always { vmq_unlock }
+  k=$(vmq_key $owner)
+  [[ -n $k ]] || return 0
+  print "기다리는 중: 요청 ${Q_need[$k]}"
+  for g in ${=Q_need[$k]}; do
+    for vm in ${(s:,:)g}; do print "  $vm: $(vmq_holder_line $vm)$( [[ ${Q_busy[$vm]:-} == "~"* ]] && print ", 오래 기다린 차례 ${${Q_busy[$vm]#\~}#*-} 가 맡아 둠")"; done
+  done
+  print "acquire 는 같은 명령을 다시 실행해 이어서 기다린다. 마지막 활동에서 ${VMQ_LEASE}초가 지나면 차례가 지워진다"
+}
+
+case $cmd in
+peek-check)
+  # 차례 없이 실행해도 되는 읽기인지 판별만 한다(lib/peek.zsh)
+  source "${0:A:h:h}/lib/peek.zsh"
+  peek_allowed "$*" && print "읽기: 차례 없이 실행해도 된다"
+  ;;
+list)
+  # 대상 목록(VMQ_REGISTRY)
+  for v in ${(ok)VMQ_HOST}; do print -r -- "$v	${VMQ_HOST[$v]}	${VMQ_ROLES[$v]// /,}"; done
+  ;;
+acquire)
+  parse "$@"
+  (( ${#reply} )) || usage
+  expand_groups $reply || exit 1
+  owner=$(vmq_owner) || exit 1
+  register $owner $groups; rc=$?
+  (( rc == 1 )) && exit 1
+  hold $owner $wait_s; rc=$?
+  case $rc in
+  0) print "잡음: ${REPLY// /, } (소유자 $owner). 끝나면 vmq release" ;;
+  75) waiting_line $owner; exit 75 ;;
+  *) exit 1 ;;
+  esac
+  ;;
+mine)
+  owner=$(vmq_owner) || exit 1
+  vmq_lock || exit 1
+  { vmq_sync $owner; k=$REPLY; held=${Q_held[$k]:-} } always { vmq_unlock }
+  [[ -n $held ]] || { print -u2 "잡은 VM 이 없다(소유자 $owner)"; exit 1 }
+  print -r -- $held
+  ;;
+release)
+  owner=$(vmq_owner) || exit 1
+  vms=("$@"); (( ${#vms} )) || vms=(${(k)VMQ_HOST})
+  gone=()
+  vmq_lock || exit 1
+  {
+    vmq_scan
+    k=$(vmq_key $owner)
+    if [[ -n $k ]]; then
+      left=()
+      for vm in ${=Q_vms[$k]}; do
+        if (( ${vms[(Ie)$vm]} )); then rm -f -- "$VMQ_DIR/$vm/$k"; gone+=($vm); else left+=($vm); fi
+      done
+      # 일부만 놓으면 남은 VM 으로 held · need 를 줄인다(놓은 VM 을 다시 기다리지 않게)
+      if (( ${#left} && ${#gone} )) && [[ -n ${Q_held[$k]} ]]; then
+        f="$VMQ_DIR/${left[1]}/$k"
+        for vm in $left; do vmq_write "$VMQ_DIR/$vm/$k" $owner "$(vmq_field $f label)" "$(vmq_field $f created)" "$left" "$left"; done
+      fi
+    fi
+    (( ${#gone} )) && vmq_log "놓음 $owner ${(j: :)gone}"
+  } always { vmq_unlock }
+  (( ${#gone} )) && print "놓음: ${(j:, :)gone}" || print "놓을 차례가 없다(소유자 $owner)"
+  ;;
+status)
+  vms=("$@"); (( ${#vms} )) || vms=(${(ok)VMQ_HOST})
+  me=$(vmq_owner 2>/dev/null || print -)
+  vmq_lock || exit 1
+  { vmq_purge; vmq_scan; vmq_plan } always { vmq_unlock }
+  for vm in $vms; do
+    host=${VMQ_HOST[$vm]:-?}
+    vmq_tickets $vm
+    hk=$(vmq_holder $vm)
+    if [[ -z $hk ]]; then
+      line="$vm ($host): 비어 있음"
+      [[ ${Q_busy[$vm]:-} == "~"* ]] && line+=", 오래 기다린 차례 ${${Q_busy[$vm]#\~}#*-} 가 맡아 둠"
+      [[ -n ${Q_busy[$vm]:-} && ${Q_busy[$vm]} != "~"* ]] && line+=", ${Q_busy[$vm]#*-} 에게 배정됨(그 소유자가 다음에 확인할 때 잡는다)"
+      print -r -- $line
+    else
+      f="$VMQ_DIR/$vm/$hk"; o=$(vmq_key_owner $hk); l=$(vmq_field $f label); c=$(vmq_field $f created)
+      mark=""; [[ $o == $me ]] && mark=" ← 이 세션"
+      print "$vm ($host): 잡음 $o${l:+ ($l)}, 함께 잡은 VM ${Q_held[$hk]}, 등록 $(( EPOCHSECONDS - c ))초 전, 마지막 활동 $(vmq_idle $f)초 전, 만료까지 $(( VMQ_LEASE - $(vmq_idle $f) ))초$mark"
+    fi
+    i=1
+    for f in $reply; do
+      k=${f:t}
+      [[ $k == $hk ]] && continue
+      o=$(vmq_key_owner $k); l=$(vmq_field $f label); c=$(vmq_field $f created)
+      mark=""; [[ $o == $me ]] && mark=" ← 이 세션"
+      print "  대기 $i: $o${l:+ ($l)}, 요청 ${Q_need[$k]}, 등록 $(( EPOCHSECONDS - c ))초 전$mark"
+      (( i++ ))
+    done
+  done
+  ;;
+run)
+  parse "$@"; specs=() cmdline=()
+  # `--` 앞은 묶음, 뒤는 명령
+  seen=0
+  for a in $reply; do
+    if (( ! seen )) && [[ $a == -- ]]; then seen=1; continue; fi
+    (( seen )) && cmdline+=("$a") || specs+=("$a")
+  done
+  (( ${#specs} && ${#cmdline} )) || usage
+  expand_groups $specs || exit 1
+  owner=$(vmq_owner) || exit 1
+  register $owner $groups; rc=$?
+  (( rc == 1 )) && exit 1
+  mine=$(( rc == 0 ))
+  hold $owner 0 || exit 1
+  granted=$REPLY
+  VM_QUEUE_GRANTED=$granted "${cmdline[@]}"; rc=$?
+  (( mine )) && "${0:A}" release ${=granted} >/dev/null
+  exit $rc
+  ;;
+force-release)
+  vm=${1:?대상}; [[ -n ${VMQ_HOST[$vm]:-} ]] || { print -u2 "모르는 대상: $vm"; exit 1 }
+  vmq_lock || exit 1
+  {
+    vmq_scan
+    hk=$(vmq_holder $vm)
+    if [[ -n $hk ]]; then
+      for v in ${=Q_vms[$hk]}; do rm -f -- "$VMQ_DIR/$v/$hk"; done
+      vmq_log "강제로 놓음 ${Q_vms[$hk]} $(vmq_key_owner $hk) (요청 $(vmq_owner 2>/dev/null || print -))"
+      print "강제로 놓음: ${Q_vms[$hk]} 의 $(vmq_key_owner $hk)"
+    else
+      print "$vm: 잡은 차례가 없다"
+    fi
+  } always { vmq_unlock }
+  ;;
+*) usage ;;
+esac

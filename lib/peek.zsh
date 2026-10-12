@@ -6,6 +6,10 @@
 # 차례를 받아 실행하게 한다.
 #
 # 명령 한 줄은 `|` 로 이은 단계들이다. 단계마다 첫 낱말이 PEEK_COMMANDS 에 있어야 하고, 그 명령의 인자 규칙(peek_args)을 지켜야 한다.
+# 첫 낱말은 이름이나 시스템 폴더(PEEK_SYSTEM_DIRS)의 절대 경로다. 그 밖의 절대 경로는 목록의 이름이어도 받지 않는다.
+# `log` 는 이름으로 받지 않고 `/usr/bin/log` 로만 받는다(PEEK_SHELL_BUILTINS): 대상의 셸이 zsh 라 이름으로 부르면 zsh 의 내장 명령
+# log(로그인 감시)가 불려 `zsh:log:1: too many arguments` 로 끝난다(2026-10-12, poieve `tools/vm.sh peek PoieveServer 'log show …'` 의
+# 종료 코드 1). 전에는 판별은 통과하고 실행은 늘 실패했다.
 # `;` · `&` · `>` · `<` · 역따옴표 · `$(` · 줄바꿈은 받지 않는다(명령을 잇거나 파일에 쓰거나 다른 명령을 끼워 넣는 문법이다). sudo 는
 # 목록에 없다. 화면 캡처 · cua-driver 는 읽기여도 다른 소유자가 조작하는 도중의 화면이라 차례 안에서 한다(§18).
 
@@ -14,6 +18,12 @@ typeset -ga PEEK_COMMANDS=(
   pgrep ps lsof netstat df du sw_vers scutil uname id whoami date uptime hostname
   defaults launchctl log sqlite3 plutil mdls xattr shasum md5 find sysctl codesign pluginkit system_profiler ioreg sw_vers
 )
+
+# 첫 낱말을 절대 경로로 적을 때 받는 폴더. 목록의 명령이 macOS 에서 있는 곳이다.
+typeset -ga PEEK_SYSTEM_DIRS=(/usr/bin /bin /usr/sbin /sbin)
+
+# 이름으로 부르면 대상의 zsh 에서 같은 이름의 내장 명령이 불리는 것. 시스템 폴더의 절대 경로로만 받는다.
+typeset -ga PEEK_SHELL_BUILTINS=(log)
 
 # 인자 규칙: peek_args <명령> <인자…>. 위반이면 이유를 stderr 에 쓰고 1.
 peek_args() {
@@ -40,7 +50,7 @@ peek_args() {
 
 # 명령 한 줄이 차례 없이 실행해도 되는 읽기인가: peek_allowed <명령 한 줄>
 peek_allowed() {
-  local line=$1 seg w
+  local line=$1 seg w name
   [[ -n ${line//[[:space:]]/} ]] || { print -u2 "명령이 없다"; return 1 }
   if [[ $line == *[\;\&\<\>\`$'\n']* || $line == *'$('* ]]; then
     print -u2 "명령을 잇거나 파일에 쓰는 문법(; & > < 역따옴표 \$( 줄바꿈)은 받지 않는다"; return 1
@@ -48,7 +58,14 @@ peek_allowed() {
   for seg in "${(@s:|:)line}"; do
     w=(${(Q)${(z)seg}})
     (( ${#w} )) || { print -u2 "빈 단계가 있다(|| 등)"; return 1 }
-    (( ${PEEK_COMMANDS[(Ie)${w[1]}]} )) || { print -u2 "차례 없이 실행할 수 없는 명령: ${w[1]} (읽기 목록: ${PEEK_COMMANDS})"; return 1 }
-    peek_args "${w[@]}" || return 1
+    name=${w[1]}
+    if [[ $name == /* ]]; then
+      (( ${PEEK_SYSTEM_DIRS[(Ie)${name:h}]} )) || { print -u2 "절대 경로는 ${PEEK_SYSTEM_DIRS} 의 명령만 받는다: $name"; return 1 }
+      name=${name:t}
+    elif (( ${PEEK_SHELL_BUILTINS[(Ie)$name]} )); then
+      print -u2 "대상의 zsh 에서 같은 이름의 내장 명령이 불리는 명령: $name. 절대 경로로 적는다(예: /usr/bin/$name)"; return 1
+    fi
+    (( ${PEEK_COMMANDS[(Ie)$name]} )) || { print -u2 "차례 없이 실행할 수 없는 명령: ${w[1]} (읽기 목록: ${PEEK_COMMANDS})"; return 1 }
+    peek_args $name "${(@)w[2,-1]}" || return 1
   done
 }

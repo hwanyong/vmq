@@ -6,4 +6,4 @@
 PoieveServer	10.10.10.2	server,poieve
 PoieveServer2	10.10.10.1	server,poieve
 PoieveClient	10.10.10.2	client,poieve
-PoieveClient2	10.10.10.1	poieve,setup
+PoieveClient2	10.10.10.1	client,poieve

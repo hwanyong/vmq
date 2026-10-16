@@ -128,7 +128,7 @@ waiting_line() {
   for g in ${=Q_need[$k]}; do
     for vm in ${(s:,:)g}; do print "  $vm: $(vmq_holder_line $vm)$( [[ ${Q_busy[$vm]:-} == "~"* ]] && print ", 오래 기다린 차례 ${${Q_busy[$vm]#\~}#*-} 가 맡아 둠")"; done
   done
-  print "acquire 는 같은 명령을 다시 실행해 이어서 기다린다. 마지막 활동에서 ${VMQ_LEASE}초가 지나면 차례가 지워진다"
+  print "acquire 는 같은 명령을 다시 실행해 이어서 기다린다. 잡은 쪽의 차례는 마지막 활동에서 ${VMQ_LEASE}초가 지나면 지워진다(그 차례를 쥔 프로세스가 살아 있으면 마지막 제어 명령에서 ${VMQ_HOLD_MAX}초까지는 지우지 않는다)"
 }
 
 case $cmd in
@@ -178,7 +178,7 @@ release)
       # 일부만 놓으면 남은 VM 으로 held · need 를 줄인다(놓은 VM 을 다시 기다리지 않게)
       if (( ${#left} && ${#gone} )) && [[ -n ${Q_held[$k]} ]]; then
         f="$VMQ_DIR/${left[1]}/$k"
-        for vm in $left; do vmq_write "$VMQ_DIR/$vm/$k" $owner "$(vmq_field $f label)" "$(vmq_field $f created)" "$left" "$left"; done
+        for vm in $left; do vmq_write "$VMQ_DIR/$vm/$k" $owner "$(vmq_field $f label)" "$(vmq_field $f created)" "$left" "$left" "$(vmq_field $f active)" "$(vmq_field $f procs)"; done
       fi
     fi
     (( ${#gone} )) && vmq_log "놓음 $owner ${(j: :)gone}"
@@ -202,7 +202,13 @@ status)
     else
       f="$VMQ_DIR/$vm/$hk"; o=$(vmq_key_owner $hk); l=$(vmq_field $f label); c=$(vmq_field $f created)
       mark=""; [[ $o == $me ]] && mark=" ← 이 세션"
-      print "$vm ($host): 잡음 $o${l:+ ($l)}, 함께 잡은 VM ${Q_held[$hk]}, 등록 $(( EPOCHSECONDS - c ))초 전, 마지막 활동 $(vmq_idle $f)초 전, 만료까지 $(( VMQ_LEASE - $(vmq_idle $f) ))초$mark"
+      a=$(vmq_field $f active)
+      if alive=$(vmq_procs_alive "$(vmq_field $f procs)") && (( EPOCHSECONDS - ${a:-0} <= VMQ_HOLD_MAX )); then
+        lease_line="프로세스 $alive 가 살아 있어 만료되지 않음(마지막 제어 명령 $(( EPOCHSECONDS - a ))초 전, 상한 ${VMQ_HOLD_MAX}초)"
+      else
+        lease_line="마지막 활동 $(vmq_idle $f)초 전, 만료까지 $(( VMQ_LEASE - $(vmq_idle $f) ))초"
+      fi
+      print "$vm ($host): 잡음 $o${l:+ ($l)}, 함께 잡은 VM ${Q_held[$hk]}, 등록 $(( EPOCHSECONDS - c ))초 전, $lease_line$mark"
     fi
     i=1
     for f in $reply; do
@@ -231,6 +237,9 @@ run)
   mine=$(( rc == 0 ))
   hold $owner 0 || exit 1
   granted=$REPLY
+  # 명령이 도는 동안 이 프로세스가 차례를 쥔다(명령이 vmq_require 를 부르지 않아도 만료되지 않게)
+  vmq_lock || exit 1
+  { vmq_sync $owner; vmq_attach $REPLY $$ } always { vmq_unlock }
   VM_QUEUE_GRANTED=$granted "${cmdline[@]}"; rc=$?
   (( mine )) && "${0:A}" release ${=granted} >/dev/null
   exit $rc

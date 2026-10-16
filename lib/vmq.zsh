@@ -14,7 +14,8 @@
 # 또는 역할 `@server`). 2026-10-12 사용자 지시 「VM 사용에 병목이 생긴다면, MacMini에 있는 VM으로도 사용해도 돼. 이러한 VM 할당을
 # 유동적으로 제어해서 큐의 항목을 이전하여 처리 속도를 원활하게 할 수 있도록 해」에 따라 후보 중 먼저 비는 대상을 준다.
 # 차례 파일: $VMQ_DIR/<후보>/<일련번호 10자리>-<소유자>. 후보마다 같은 내용의 파일을 둔다. 줄: owner · label · created ·
-# need(묶음을 공백으로, 후보를 쉼표로) · held(잡은 대상, 잡은 뒤에만). 잡으면 받지 않은 후보의 파일을 지운다. 파일의 수정 시각이 마지막 활동이다.
+# need(묶음을 공백으로, 후보를 쉼표로) · held(잡은 대상, 잡은 뒤에만) · active(마지막 제어 명령의 시각) · procs(그 제어 명령을 부른
+# 프로세스, `<PID>@<시작 시각>` 을 공백으로). 잡으면 받지 않은 후보의 파일을 지운다. 파일의 수정 시각이 마지막 활동이다.
 #
 # 배정(vmq_plan): 잡은 차례의 대상을 먼저 빼고, 기다리는 차례를 일련번호 순으로 보며 묶음마다 비어 있는 후보를 하나씩 고른다. 모든 묶음이
 # 채워지면 그 차례에 배정한다. 채워지지 않은 차례는 건너뛰므로, 앞 차례가 다른 대상을 기다리는 동안 뒤 차례가 빈 대상을 쓸 수 있다.
@@ -25,6 +26,13 @@
 # 세션 ID 를 물려받으므로, 하위 에이전트가 따로 대상을 다루면 VM_QUEUE_OWNER 를 따로 정한다.
 # 차례는 마지막 활동에서 VM_QUEUE_LEASE 초(기본 1200) 동안 유효하다. 제어 명령의 vmq_require 와 acquire 가 시각을 새로 적는다. 그보다
 # 오래 활동이 없는 차례는 다음에 차례표를 읽는 쪽이 지운다.
+# 차례를 쥔 프로세스가 살아 있으면 활동이 없어도 지우지 않는다. vmq_require 가 자기를 부른 셸 프로세스($$, 스크립트면 그 스크립트)를
+# procs 에 적고, 차례표를 읽는 쪽(vmq_purge)은 그 프로세스가 살아 있으면 수정 시각을 새로 적는다. 그래서 그 프로세스가 끝나면 끝난 뒤
+# 차례표를 처음 읽은 때부터 VM_QUEUE_LEASE 초 뒤 지워진다(기다리는 쪽이 2초마다 읽는다). 마지막 제어 명령(active)에서 VM_QUEUE_HOLD_MAX 초
+# (기본 3600)가 지나면 프로세스가 살아 있어도 새로 적지 않아, 멈춘 스크립트의 차례도 그 뒤 VM_QUEUE_LEASE 초 안에 지워진다.
+# 2026-10-16 에 한 단계가 1200초 넘게 제어 명령을 부르지 않은 실행 중인 묶음의 차례가 지워지고, 다음 차례가 VM 을 되돌려 그 묶음이 깨졌다
+# (poieve tracker bug_1792137322422_fwsach). 상한 3600초는 VM 을 다루지 않는 긴 한 단계인 poieve 앱 빌드(최근 빌드 기록 15개 중 14개가
+# 1188초 이하)의 세 배쯤으로 잡았다.
 
 zmodload zsh/datetime
 zmodload -F zsh/stat b:zstat
@@ -34,6 +42,7 @@ VMQ_REGISTRY=${VMQ_REGISTRY:-$VMQ_ROOT/resources.tsv}
 VMQ_DIR=${VM_QUEUE_DIR:-$HOME/Library/Application Support/vmq/queue}
 VMQ_LEASE=${VM_QUEUE_LEASE:-1200}
 VMQ_STARVE=${VM_QUEUE_STARVE:-1800}
+VMQ_HOLD_MAX=${VM_QUEUE_HOLD_MAX:-3600}
 # 차례표를 읽은 결과(vmq_scan). 키는 차례 파일 이름(<일련번호>-<소유자>).
 typeset -gA Q_vms Q_file Q_need Q_held Q_alloc Q_busy
 
@@ -85,9 +94,24 @@ vmq_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1 }
 # 공백으로 나눈 목록에 그 낱말이 있는가: vmq_has <목록> <낱말>
 vmq_has() { [[ " $1 " == *" $2 "* ]] }
 
-# 차례 파일을 다시 쓴다: vmq_write <파일> <owner> <label> <created> <need> [held]
+# 차례 파일을 다시 쓴다: vmq_write <파일> <owner> <label> <created> <need> [held] [active] [procs]
 vmq_write() {
-  print -l "owner=$2" "label=$3" "created=$4" "need=$5" ${6:+"held=$6"} > "$1"
+  print -l "owner=$2" "label=$3" "created=$4" "need=$5" ${6:+"held=$6"} ${7:+"active=$7"} ${8:+"procs=$8"} > "$1"
+}
+
+# 프로세스 하나를 가리키는 값 `<PID>@<시작 시각>`: vmq_proc_id <PID>. 없는 프로세스면 1. 시작 시각을 함께 적어, 끝난 프로세스의 PID 를
+# 다른 프로세스가 다시 받아도 살아 있는 것으로 보지 않는다.
+vmq_proc_id() {
+  local s=$(ps -o lstart= -p $1 2>/dev/null)
+  [[ -n ${s// } ]] || return 1
+  print -r -- "$1@${(j:_:)${=s}}"
+}
+# procs 의 프로세스 가운데 살아 있는 것: vmq_procs_alive <procs> → 살아 있는 것을 공백으로 찍는다. 하나도 없으면 1.
+vmq_procs_alive() {
+  local p out=()
+  for p in ${=1}; do [[ $(vmq_proc_id ${p%%@*}) == $p ]] && out+=($p); done
+  (( ${#out} )) || return 1
+  print -r -- ${out}
 }
 
 # 묶음 하나(쉼표로 적은 후보)를 풀어 쉼표 목록으로 낸다: vmq_expand <묶음>. 모르는 이름 · 역할이면 1.
@@ -109,15 +133,23 @@ vmq_expand() {
   print -r -- ${(j:,:)out}
 }
 
-# 마지막 활동에서 VMQ_LEASE 가 지난 차례를 지운다(잠금 안에서 부른다).
+# 마지막 활동에서 VMQ_LEASE 가 지난 차례를 지운다(잠금 안에서 부른다). 그 전에, 차례를 쥔 프로세스가 살아 있고 마지막 제어 명령에서
+# VMQ_HOLD_MAX 가 지나지 않은 차례는 수정 시각을 새로 적어 지우지 않는다.
 vmq_purge() {
-  local vm f idle
+  local vm f idle procs alive active why
   for vm in ${(ok)VMQ_HOST}; do
     vmq_tickets $vm
     for f in $reply; do
+      why=
+      procs=$(vmq_field $f procs)
+      if [[ -n $procs ]] && alive=$(vmq_procs_alive "$procs"); then
+        active=$(vmq_field $f active)
+        if (( EPOCHSECONDS - ${active:-0} <= VMQ_HOLD_MAX )); then touch -- "$f"; continue; fi
+        why=", 프로세스 $alive 는 살아 있지만 마지막 제어 명령에서 상한 ${VMQ_HOLD_MAX}초가 지났다"
+      fi
       idle=$(vmq_idle $f)
       (( idle > VMQ_LEASE )) || continue
-      rm -f -- "$f" && vmq_log "만료 $vm $(vmq_key_owner ${f:t}) (마지막 활동 ${idle}초 전)"
+      rm -f -- "$f" && vmq_log "만료 $vm $(vmq_key_owner ${f:t}) (마지막 활동 ${idle}초 전$why)"
     done
   done
 }
@@ -242,7 +274,22 @@ vmq_holder_line() {
   print "$(vmq_key_owner $k)${l:+ ($l)}, 마지막 활동 $(vmq_idle $f)초 전, 대기 $n"
 }
 
-# 프로젝트 도구가 제어 명령 앞에서 부른다: vmq_require <대상>… 차례를 가졌으면 시각을 새로 적고 0, 아니면 이유를 stderr 에 쓰고 1.
+# 잡은 차례에 제어 명령의 시각과 그 명령을 부른 프로세스를 적는다(잠금 안에서, vmq_sync 뒤): vmq_attach <키> <PID>.
+# 끝난 프로세스는 procs 에서 뺀다.
+vmq_attach() {
+  local k=$1 me vm f procs
+  me=$(vmq_proc_id $2) || return 0
+  f=${Q_file[$k]}
+  procs=$(vmq_procs_alive "$(vmq_field $f procs)")
+  vmq_has "$procs" $me || procs="${procs:+$procs }$me"
+  for vm in ${=Q_vms[$k]}; do
+    f="$VMQ_DIR/$vm/$k"
+    vmq_write $f "$(vmq_field $f owner)" "$(vmq_field $f label)" "$(vmq_field $f created)" "$(vmq_field $f need)" "$(vmq_field $f held)" $EPOCHSECONDS "$procs"
+  done
+}
+
+# 프로젝트 도구가 제어 명령 앞에서 부른다: vmq_require <대상>… 차례를 가졌으면 시각과 이 셸 프로세스($$)를 적고 0, 아니면 이유를
+# stderr 에 쓰고 1. 적은 프로세스가 살아 있는 동안 차례는 만료되지 않는다(위 「만료」, 상한 VM_QUEUE_HOLD_MAX).
 vmq_require() {
   [[ ${VM_QUEUE_INTERNAL:-} == 1 ]] && return 0
   local owner vm ok=0
@@ -252,6 +299,7 @@ vmq_require() {
     vmq_sync $owner
     if vmq_holds $owner "$@"; then
       ok=1
+      vmq_attach $REPLY $$
     else
       for vm in "$@"; do
         vmq_holds $owner $vm && continue

@@ -3,7 +3,9 @@
 # 10.10.10.1 = Mac mini, 10.10.10.2 = Mac Studio(두 Mac 을 잇는 Thunderbolt 브리지).
 # 역할은 acquire 의 묶음에 @<역할> 로 적어 후보 묶음으로 쓴다(@server 는 역할 server 를 가진 대상 전부).
 # 대상을 더하거나 지우면 이 파일만 고친다. 그 대상을 다루는 프로젝트의 도구가 이 파일에서 이름 · Mac 을 읽는다.
-PoieveServer	10.10.10.2	server,poieve
+# 막음 PoieveServer	10.10.10.2	server,poieve
 PoieveServer2	10.10.10.1	server,poieve
-PoieveClient	10.10.10.2	client,poieve
+# 막음 PoieveClient	10.10.10.2	client,poieve
 PoieveClient2	10.10.10.1	client,poieve
+PoieveWebDocker	10.10.10.1	web,docker
+# 2026-10-15 사용자 지시 「내가 지시하기 전까진 Mac Studio VirtualBuddy를 사용하지마」(RAM 부족)로 Mac Studio 의 두 줄을 「# 막음」 으로 막았다. 다시 쓰려면 사용자 지시 뒤 그 접두사를 지운다.

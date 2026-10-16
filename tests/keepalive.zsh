@@ -55,5 +55,15 @@ wait $r
 got_after B 5; check "6. run 이 끝나면 놓아 B 가 받는다" 0 $REPLY; print "   끝난 뒤 걸린 시간 ${took}초"
 VM_QUEUE_OWNER=B $V release >/dev/null
 
+# 7. 쥔 프로세스를 적은 쪽과 읽는 쪽의 로캘 · 시간대가 달라도 살아 있는 것으로 본다(bug_1792168576710_qdniti).
+#    A 는 TZ=Asia/Seoul · LC_ALL=ko_KR.UTF-8 로 적고, B 는 TZ=America/Los_Angeles · LC_ALL=C 로 기다린다
+VM_QUEUE_OWNER=A $V acquire -w 5 $X >/dev/null
+TZ=Asia/Seoul LC_ALL=ko_KR.UTF-8 VM_QUEUE_OWNER=A zsh -c "source ${(q)LIB}; vmq_require $X || exit 1; sleep 14" >/dev/null 2>&1 & sleep 1; p=$!
+t=$EPOCHSECONDS; TZ=America/Los_Angeles LC_ALL=C VM_QUEUE_OWNER=B $V acquire -w 9 $X >/dev/null 2>&1; rc=$?
+check "7. 다른 TZ · 로캘로 적은 쥔 프로세스(PID $p)가 살아 있는 동안 B 는 9초 기다려도 받지 못한다" 75 $rc; print "   걸린 시간 $(( EPOCHSECONDS - t ))초"
+wait_gone $p
+TZ=America/Los_Angeles LC_ALL=C VM_QUEUE_OWNER=B $V acquire -w 14 $X >/dev/null 2>&1; check "7. 그 프로세스가 끝나면 만료되어 B 가 받는다" 0 $?
+VM_QUEUE_OWNER=B $V release >/dev/null
+
 print "맞음 $pass · 틀림 $fail"
 (( fail == 0 ))

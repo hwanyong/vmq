@@ -100,9 +100,11 @@ vmq_write() {
 }
 
 # 프로세스 하나를 가리키는 값 `<PID>@<시작 시각>`: vmq_proc_id <PID>. 없는 프로세스면 1. 시작 시각을 함께 적어, 끝난 프로세스의 PID 를
-# 다른 프로세스가 다시 받아도 살아 있는 것으로 보지 않는다.
+# 다른 프로세스가 다시 받아도 살아 있는 것으로 보지 않는다. 시작 시각은 LC_ALL=C · TZ=UTC 로 고정해 읽는다. `ps -o lstart=` 는 부른 셸의
+# 로캘 · 시간대로 적어, 적은 세션과 읽는 세션의 LANG · TZ 가 다르면 살아 있는 프로세스를 끝난 것으로 보았다(bug_1792168576710_qdniti).
+# 이 규칙 전에 적힌 값은 차례를 쥔 쪽이 다음 vmq_require 에서 새 값으로 다시 적는다(vmq_attach). 그때까지는 마지막 활동에서 VM_QUEUE_LEASE 로 만료를 본다.
 vmq_proc_id() {
-  local s=$(ps -o lstart= -p $1 2>/dev/null)
+  local s=$(LC_ALL=C TZ=UTC ps -o lstart= -p $1 2>/dev/null)
   [[ -n ${s// } ]] || return 1
   print -r -- "$1@${(j:_:)${=s}}"
 }

@@ -2,9 +2,10 @@
 # 제어 대상 큐(전역 규약 §18, ~/.claude/tools/vmq/README.md, 규칙 · 차례 파일 · 배정은 lib/vmq.zsh). 대상을 다루기 전에 차례를 받고,
 # 끝나면 놓는다. 차례가 없으면 그 대상을 다루는 프로젝트 도구(예: poieve 의 tools/vm.sh · tools/vm-ui.sh)가 거절한다.
 # 사용:
-#   vmq acquire [-w 초] [-l 설명] <묶음>…   차례를 받는다. 묶음마다 VM 하나를 받는다. 묶음은 VM 이름, 쉼표로 적은 후보
+#   vmq acquire [-w 초] [-l 설명] <묶음>…   차례를 받는다. 묶음마다 후보 하나를 받는다. 묶음은 VM 이름, 쉼표로 적은 후보
 #                                                      (PoieveServer,PoieveServer2), 역할(@server · @client) 중 하나다. 후보 중 먼저 비는
-#                                                      VM 을 받는다. 다른 소유자가 잡고 있으면 기다린다(기본 90초). 잡으면 종료 코드 0 이고
+#                                                      것을 받는다. 후보는 + 로 이은 VM 여럿일 수 있고(PoieveServer2+PoieveClient2), 그 VM 이
+#                                                      모두 빌 때 함께 받는다. @server+@client 는 같은 Mac 의 서버 · 클라이언트 짝들이다. 다른 소유자가 잡고 있으면 기다린다(기본 90초). 잡으면 종료 코드 0 이고
 #                                                      받은 VM 을 묶음 순서로 찍는다. 기다리다 시간이 다 되면 75 이고 차례는 남는다(같은
 #                                                      명령을 다시 실행해 이어서 기다린다). 기다리는 중에 다른 묶음으로 다시 실행하면 같은
 #                                                      순번으로 요청을 바꾼다
@@ -45,14 +46,18 @@ expand_groups() {
   for g in "$@"; do e=$(vmq_expand $g) || return 1; groups+=($e); done
 }
 
-# 잡은 VM 으로 묶음들을 채울 수 있는가: covers <잡은 VM 목록> <묶음>…
+# 잡은 VM 으로 묶음들을 채울 수 있는가: covers <잡은 VM 목록> <묶음>…. 후보의 VM(+ 로 이은 것)이 모두 잡은 것에 있어야 한다.
 covers() {
-  local held=$1 g vm used=() hit; shift
+  local held=$1 g c vm used=() hit ok; shift
   for g in "$@"; do
     hit=
-    for vm in ${(s:,:)g}; do vmq_has "$held" $vm && (( ! ${used[(Ie)$vm]} )) && { hit=$vm; break }; done
+    for c in ${(s:,:)g}; do
+      ok=1
+      for vm in ${(s:+:)c}; do vmq_has "$held" $vm && (( ! ${used[(Ie)$vm]} )) || { ok=0; break }; done
+      (( ok )) && { hit=$c; break }
+    done
     [[ -n $hit ]] || return 1
-    used+=($hit)
+    used+=(${(s:+:)hit})
   done
 }
 
@@ -62,8 +67,7 @@ register() {
   local owner=$1 vm k f seq rc=3 c all=()
   shift
   local need="$*"
-  for f in "$@"; do all+=(${(s:,:)f}); done
-  all=(${(u)all})
+  vmq_all_members "$@"; all=($reply)
   vmq_lock || return 1
   {
     vmq_sync $owner
@@ -125,9 +129,8 @@ waiting_line() {
   k=$(vmq_key $owner)
   [[ -n $k ]] || return 0
   print "기다리는 중: 요청 ${Q_need[$k]}"
-  for g in ${=Q_need[$k]}; do
-    for vm in ${(s:,:)g}; do print "  $vm: $(vmq_holder_line $vm)$( [[ ${Q_busy[$vm]:-} == "~"* ]] && print ", 오래 기다린 차례 ${${Q_busy[$vm]#\~}#*-} 가 맡아 둠")"; done
-  done
+  vmq_all_members ${=Q_need[$k]}
+  for vm in $reply; do print "  $vm: $(vmq_holder_line $vm)$( [[ ${Q_busy[$vm]:-} == "~"* ]] && print ", 오래 기다린 차례 ${${Q_busy[$vm]#\~}#*-} 가 맡아 둠")"; done
   print "acquire 는 같은 명령을 다시 실행해 이어서 기다린다. 잡은 쪽의 차례는 마지막 활동에서 ${VMQ_LEASE}초가 지나면 지워진다(그 차례를 쥔 프로세스가 살아 있으면 마지막 제어 명령에서 ${VMQ_HOLD_MAX}초까지는 지우지 않는다)"
 }
 

@@ -10,14 +10,16 @@
 # mkdir 을 믿지 않는다. 다른 Mac 에 있는 대상도 그 대상을 다루는 명령을 실행하는 Mac 의 차례표를 쓴다. 도구가 다른 Mac 에서 자기를 다시
 # 실행할 때는 VM_QUEUE_INTERNAL=1 로 검사를 건너뛴다.
 #
-# 차례 하나 = 요청 하나. 요청은 묶음의 목록이고, 묶음마다 대상 하나를 받는다. 묶음은 쉼표로 적은 후보다(`PoieveServer,PoieveServer2`,
-# 또는 역할 `@server`). 2026-10-12 사용자 지시 「VM 사용에 병목이 생긴다면, MacMini에 있는 VM으로도 사용해도 돼. 이러한 VM 할당을
+# 차례 하나 = 요청 하나. 요청은 묶음의 목록이고, 묶음마다 후보 하나를 받는다. 묶음은 쉼표로 적은 후보다(`PoieveServer,PoieveServer2`,
+# 또는 역할 `@server`). 후보 하나가 대상 여럿일 수 있다: `+` 로 잇는다(`PoieveServer2+PoieveClient2`). 그 후보는 그 대상들이 모두 빌 때만
+# 받는다. `+` 로 이은 부분에 역할이 있으면(`@server+@client`) 같은 Mac(resources.tsv 의 둘째 열)의 대상끼리만 잇는다. 서버 · 클라이언트를
+# 같은 Mac 의 짝으로 받을 때 쓴다(두 Mac 의 VM 은 서로 다른 NAT 망이라 섞인 짝은 페어링되지 않는다, poieve task_1792215878907_oe4o0d). 2026-10-12 사용자 지시 「VM 사용에 병목이 생긴다면, MacMini에 있는 VM으로도 사용해도 돼. 이러한 VM 할당을
 # 유동적으로 제어해서 큐의 항목을 이전하여 처리 속도를 원활하게 할 수 있도록 해」에 따라 후보 중 먼저 비는 대상을 준다.
 # 차례 파일: $VMQ_DIR/<후보>/<일련번호 10자리>-<소유자>. 후보마다 같은 내용의 파일을 둔다. 줄: owner · label · created ·
-# need(묶음을 공백으로, 후보를 쉼표로) · held(잡은 대상, 잡은 뒤에만) · active(마지막 제어 명령의 시각) · procs(그 제어 명령을 부른
+# need(묶음을 공백으로, 후보를 쉼표로, 후보 안의 대상을 +로. `+` 가 없는 옛 요청은 대상 하나짜리 후보로 그대로 읽는다) · held(잡은 대상, 잡은 뒤에만) · active(마지막 제어 명령의 시각) · procs(그 제어 명령을 부른
 # 프로세스, `<PID>@<시작 시각>` 을 공백으로). 잡으면 받지 않은 후보의 파일을 지운다. 파일의 수정 시각이 마지막 활동이다.
 #
-# 배정(vmq_plan): 잡은 차례의 대상을 먼저 빼고, 기다리는 차례를 일련번호 순으로 보며 묶음마다 비어 있는 후보를 하나씩 고른다. 모든 묶음이
+# 배정(vmq_plan): 잡은 차례의 대상을 먼저 빼고, 기다리는 차례를 일련번호 순으로 보며 묶음마다 대상이 모두 비어 있는 후보를 하나씩 고른다. 모든 묶음이
 # 채워지면 그 차례에 배정한다. 채워지지 않은 차례는 건너뛰므로, 앞 차례가 다른 대상을 기다리는 동안 뒤 차례가 빈 대상을 쓸 수 있다.
 # 등록에서 VM_QUEUE_STARVE 초(기본 1800)가 지난 차례는 채워지지 않아도 자기 후보 중 빈 대상을 맡아 두어 뒤 차례가 가져가지 못하게 한다
 # (뒤 차례가 빈 대상을 계속 가져가 앞 차례가 끝없이 기다리는 일을 막는다). 배정된 차례는 그 소유자의 acquire · 제어 명령이 잡는다(vmq_commit).
@@ -116,13 +118,26 @@ vmq_procs_alive() {
   print -r -- ${out}
 }
 
+# 후보 안의 대상: vmq_members <후보> → reply. `+` 로 이은 이름들이다.
+vmq_members() { reply=(${(s:+:)1}) }
+# 후보 여럿의 대상 전부(중복 없이): vmq_all_members <묶음>… → reply
+vmq_all_members() {
+  local g c out=()
+  for g in "$@"; do for c in ${(s:,:)g}; do out+=(${(s:+:)c}); done; done
+  reply=(${(u)out})
+}
+
 # 묶음 하나(쉼표로 적은 후보)를 풀어 쉼표 목록으로 낸다: vmq_expand <묶음>. 모르는 이름 · 역할이면 1.
-# @<역할> 은 대상 목록에서 그 역할을 가진 대상 전부다(이름 순서).
+# @<역할> 은 대상 목록에서 그 역할을 가진 대상 전부다(이름 순서). `+` 로 이은 후보에 역할이 있으면 Mac 마다(이름 순서) 그 Mac 의 대상으로
+# 부분을 채운 조합을 후보로 낸다. 이름만으로 이은 후보는 적은 그대로 받는다.
 vmq_expand() {
-  local out=() x
+  local out=() x c r
   for x in ${(s:,:)1}; do
-    if [[ $x == @* ]]; then
-      local r=(${(f)"$(vmq_with_role ${x#@})"})
+    if [[ $x == *+* ]]; then
+      c=$(vmq_expand_joined $x) || return 1
+      out+=(${=c})
+    elif [[ $x == @* ]]; then
+      r=(${(f)"$(vmq_with_role ${x#@})"})
       (( ${#r} )) || { print -u2 "그 역할의 대상이 없다: $x (대상 목록 $VMQ_REGISTRY)"; return 1 }
       out+=($r)
     else
@@ -133,6 +148,35 @@ vmq_expand() {
   out=(${(u)out})
   (( ${#out} )) || { print -u2 "후보가 없는 묶음: $1"; return 1 }
   print -r -- ${(j:,:)out}
+}
+# `+` 로 이은 후보 하나를 푼다: vmq_expand_joined <부분+부분…> → 공백으로 나눈 후보들. 한 후보 안에 같은 대상이 두 번 들어가지 않는다.
+vmq_expand_joined() {
+  local parts=(${(s:+:)1}) p host combos next c m here v roles=0 hosts
+  for p in $parts; do
+    if [[ $p == @* ]]; then
+      roles=1
+      [[ -n $(vmq_with_role ${p#@}) ]] || { print -u2 "그 역할의 대상이 없다: $p (대상 목록 $VMQ_REGISTRY)"; return 1 }
+    else
+      [[ -n ${VMQ_HOST[$p]:-} ]] || { print -u2 "모르는 대상: $p (대상 목록 $VMQ_REGISTRY: ${(ok)VMQ_HOST})"; return 1 }
+    fi
+  done
+  (( roles )) || { print -r -- $1; return 0 }
+  hosts=(${(ou)${(v)VMQ_HOST}})
+  local out=()
+  for host in $hosts; do
+    combos=("")
+    for p in $parts; do
+      if [[ $p == @* ]]; then m=(${(f)"$(vmq_with_role ${p#@})"}); else m=($p); fi
+      here=()
+      for v in $m; do [[ ${VMQ_HOST[$v]} == $host ]] && here+=($v); done
+      next=()
+      for c in "${combos[@]}"; do for v in $here; do vmq_has "${c//+/ }" $v || next+=(${c:+$c+}$v); done; done
+      combos=($next)
+    done
+    out+=($combos)
+  done
+  (( ${#out} )) || { print -u2 "같은 Mac 에서 채울 수 있는 후보가 없다: $1"; return 1 }
+  print -r -- $out
 }
 
 # 마지막 활동에서 VMQ_LEASE 가 지난 차례를 지운다(잠금 안에서 부른다). 그 전에, 차례를 쥔 프로세스가 살아 있고 마지막 제어 명령에서
@@ -190,7 +234,7 @@ vmq_scan() {
 # 차례를 VM 에 배정한다(잠금 안에서, vmq_scan 뒤). 결과: Q_alloc[키] = 묶음 순서대로 배정한 VM, Q_busy[VM] = 잡거나 배정되거나 맡아 둔 차례
 vmq_plan() {
   Q_alloc=() Q_busy=()
-  local k vm g pick picks ok
+  local k vm g c pick picks ok free
   for k in ${(k)Q_held}; do
     [[ -n ${Q_held[$k]} ]] || continue
     Q_alloc[$k]=${Q_held[$k]}
@@ -201,15 +245,16 @@ vmq_plan() {
     picks=() ok=1
     for g in ${=Q_need[$k]}; do
       pick=
-      for vm in ${(s:,:)g}; do
-        # 차례 파일이 없는 후보(만료로 지워진 것)는 고르지 않는다
-        vmq_has "${Q_vms[$k]}" $vm || continue
-        [[ -z ${Q_busy[$vm]:-} ]] || continue
-        (( ${picks[(Ie)$vm]} )) && continue
-        pick=$vm; break
+      for c in ${(s:,:)g}; do
+        # 후보의 대상이 모두 비어 있어야 한다. 차례 파일이 없는 대상(만료로 지워진 것)이 있는 후보는 고르지 않는다
+        vmq_members $c; free=1
+        for vm in $reply; do
+          vmq_has "${Q_vms[$k]}" $vm && [[ -z ${Q_busy[$vm]:-} ]] && (( ! ${picks[(Ie)$vm]} )) || { free=0; break }
+        done
+        (( free )) && { pick=$c; break }
       done
       [[ -n $pick ]] || { ok=0; break }
-      picks+=($pick)
+      picks+=(${(s:+:)pick})
     done
     if (( ok )); then
       Q_alloc[$k]=${(j: :)picks}

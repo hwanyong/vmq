@@ -12,7 +12,9 @@ PoieveWebDocker	10.10.10.1	web,docker
 # 2026-10-21 사용자 지시 「맥 스튜디오에서 VM 테스트 하지마. 램 용량 부족해.」 · 「VM 테스트는 맥미니에서만 진행하기」 로 Mac Studio 의 두 줄을 다시 막았다.
 # SMB 빌드 차례(2026-10-22, poieve CloudLLM-Claude-code task_1792646015965_4a2isj). VM 이 아니라 ~/LOCAL(Mac mini 의 SMB 공유) 위에서 동시에 도는
 # 빌드 수의 상한이다. poieve 의 tools/build.sh · tools/release.sh 가 맨 앞에서 `vmq run @smbbuild` 로 하나를 받은 동안만 돈다(tools/lib/common.zsh
-# 의 smb_build_slot). 줄 수가 상한이고 둘째 열은 빌드가 도는 Mac(Mac Studio)이다. 상한 4 의 근거와 다시 재는 법은 그 저장소 README.md §7 「SMB 빌드 차례」.
+# 의 smb_build_slot). 줄 수가 상한이고 둘째 열은 빌드가 도는 Mac(Mac Studio)이다. 4 는 잰 범위 안의 값이다: Mac mini kern.num_files 가 빌드 없을 때
+# 5,860 ~ 5,956, xcodebuild 4 ~ 7개가 겹친 2026-10-22 20:22 ~ 20:42Z 에 최대 18,899 로 EMFILE 이 난 가장 낮은 값 47,715 보다 낮았다. 다시 재는 법은
+# 그 저장소 README.md §7 「SMB 빌드 차례」.
 SMBBuild1	10.10.10.2	smbbuild
 SMBBuild2	10.10.10.2	smbbuild
 SMBBuild3	10.10.10.2	smbbuild

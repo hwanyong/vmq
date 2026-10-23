@@ -95,6 +95,41 @@ vmq_owner() {
   print -r -- $o
 }
 
+# 부른 도구의 판 검사: vmq_tool_current. 이 파일을 source 한 스크립트($ZSH_ARGZERO 를 source 할 때의 작업 폴더로 푼 경로, 파일이 아니면
+# 그 작업 폴더)가 git 작업 트리 안에 있고 그 저장소의 main 브랜치에 .vmq-required 가 있으면, 그 파일의 줄마다 이 작업 트리가 통과해야
+# 한다: HEAD 가 그 커밋을 포함하거나, 그 줄에 적은 경로의 작업 트리 내용이 main 과 같다. 하나라도 어기면 까닭과 고치는 법을 stderr 에
+# 쓰고 1. 그 저장소 · 파일이 없으면 0. 줄 형식: <커밋>\t<경로(공백으로 나눔)>\t<설명>. # 으로 시작하는 줄과 빈 줄은 건너뛴다.
+# 목록을 읽는 브랜치는 VMQ_REQUIRED_REF(기본 main)로 바꿀 수 있다. 목록을 main 에 올리기 전에 시험 브랜치로 확인할 때 쓴다.
+# 2026-10-23 에 main 에서 오래전에 갈라진 작업 트리의 옛 도구로 VM 사슬을 두 번 돌려, main 에만 있던 ssh 끊기(ServerAliveInterval)가 없는
+# ssh 가 VM 짝을 19 ~ 30분 쥐었다(poieve task_1792779841439_8iolnc). 옛 도구 자신은 새 검사를 갖고 있지 않으므로, 옛 도구도 반드시
+# source 하는 이 파일이 vmq_require 에서 검사한다. 목록은 작업 트리가 아니라 main 에서 읽으므로 목록에 줄을 더하면 떠 있는 사슬에도
+# 바로 걸린다. 줄을 더하기 전에 떠 있는 사슬의 작업 트리가 그 커밋을 가졌는지 본다(거절되면 그 사슬의 뒷정리도 거절된다).
+VMQ_CALLER=${ZSH_ARGZERO:A}
+[[ -f $VMQ_CALLER ]] && VMQ_CALLER_DIR=${VMQ_CALLER:h} || VMQ_CALLER_DIR=$PWD
+vmq_tool_current() {
+  local top c paths note line ref=refs/heads/${VMQ_REQUIRED_REF:-main}
+  local -a missing
+  top=$(git -C "$VMQ_CALLER_DIR" rev-parse --show-toplevel 2>/dev/null) || return 0
+  git -C "$top" cat-file -e $ref:.vmq-required 2>/dev/null || return 0
+  while IFS=$'\t' read -r c paths note; do
+    [[ -z $c || $c == \#* ]] && continue
+    git -C "$top" merge-base --is-ancestor "$c" HEAD 2>/dev/null && continue
+    [[ -n $paths ]] && git -C "$top" diff --quiet $ref -- ${=paths} 2>/dev/null && continue
+    missing+=("$c"$'\t'"$paths"$'\t'"$note")
+  done < <(git -C "$top" show $ref:.vmq-required)
+  (( ${#missing} )) || return 0
+  print -u2 "제어 대상 큐: 이 도구의 판에 VM 을 다루는 데 필요한 main 커밋이 없어 거절한다(아무것도 하지 않았다)."
+  print -u2 "  도구: $VMQ_CALLER"
+  print -u2 "  작업 트리: $top (HEAD $(git -C "$top" rev-parse --short HEAD 2>/dev/null))"
+  for line in $missing; do
+    IFS=$'\t' read -r c paths note <<< "$line"
+    print -u2 "  없는 커밋: $c $note"
+    print -u2 "    고치는 법: 그 브랜치에 main 을 합치거나(git -C ${(q)top} merge ${ref#refs/heads/}) 그 경로만 그 판으로 바꾼다(git -C ${(q)top} checkout ${ref#refs/heads/} -- $paths)"
+  done
+  print -u2 "  목록: ${ref#refs/heads/} 브랜치의 .vmq-required"
+  return 1
+}
+
 vmq_log() { print -r -- "$(strftime '%Y-%m-%d %H:%M:%S' $EPOCHSECONDS) $*" >> "$VMQ_DIR/log" }
 
 # 차례표 전체를 바꾸는 동안 잡는 잠금. mkdir 은 로컬 APFS 에서 원자적이다. 30초 넘게 남은 잠금은 끝난 프로세스가 남긴 것으로 본다.
@@ -120,9 +155,10 @@ vmq_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1 }
 # 공백으로 나눈 목록에 그 낱말이 있는가: vmq_has <목록> <낱말>
 vmq_has() { [[ " $1 " == *" $2 "* ]] }
 
-# 차례 파일을 다시 쓴다: vmq_write <파일> <owner> <label> <created> <need> [held] [active] [procs]
+# 차례 파일을 다시 쓴다: vmq_write <파일> <owner> <label> <created> <need> [held] [active] [procs] [chain]
+# chain 은 이 차례를 쥔 사슬 셸의 `<PID>@<시작 시각>` 이다(vmq_chain_mark). 그 사슬이 끝난 차례는 같은 소유자의 acquire 에도 넘기지 않는다(bin/vmq 의 register).
 vmq_write() {
-  print -l "owner=$2" "label=$3" "created=$4" "need=$5" ${6:+"held=$6"} ${7:+"active=$7"} ${8:+"procs=$8"} > "$1"
+  print -l "owner=$2" "label=$3" "created=$4" "need=$5" ${6:+"held=$6"} ${7:+"active=$7"} ${8:+"procs=$8"} ${9:+"chain=$9"} > "$1"
 }
 
 # 프로세스 하나를 가리키는 값 `<PID>@<시작 시각>`: vmq_proc_id <PID>. 없는 프로세스면 1. 시작 시각을 함께 적어, 끝난 프로세스의 PID 를
@@ -355,15 +391,53 @@ vmq_attach() {
   vmq_has "$procs" $me || procs="${procs:+$procs }$me"
   for vm in ${=Q_vms[$k]}; do
     f="$VMQ_DIR/$vm/$k"
-    vmq_write $f "$(vmq_field $f owner)" "$(vmq_field $f label)" "$(vmq_field $f created)" "$(vmq_field $f need)" "$(vmq_field $f held)" $EPOCHSECONDS "$procs"
+    vmq_write $f "$(vmq_field $f owner)" "$(vmq_field $f label)" "$(vmq_field $f created)" "$(vmq_field $f need)" "$(vmq_field $f held)" $EPOCHSECONDS "$procs" "$(vmq_field $f chain)"
   done
+}
+
+# 잡은 차례에 그 차례를 쥔 사슬을 적는다: vmq_chain_mark <사슬 셸의 PID> <대상>… 차례를 가졌으면 0, 아니면 1.
+# 사슬(한 번 받아 VM 을 다루고 끝나는 셸, poieve 의 vm_chain_guard 가 부른다)이 끝난 뒤 그 뒷정리가 차례를 놓기 전에 같은 소유자의 다음 사슬이
+# acquire 하면, 전에는 register 가 「이미 있음」 으로 그 차례를 넘겨 앞 사슬의 뒷정리가 다음 사슬의 VM 을 끄고 되돌렸다
+# (2026-10-22 23:57 PDT, poieve tracker bug_1792779968019_9ycb6f). 사슬이 살아 있을 때 적어 두므로 사슬 셸이 끝나는 순간부터 막힌다.
+vmq_chain_mark() {
+  [[ ${VM_QUEUE_INTERNAL:-} == 1 ]] && return 0
+  local pid=$1 owner vm f chain ok=0
+  shift
+  chain=$(vmq_proc_id $pid) || { print -u2 "제어 대상 큐: 사슬 프로세스 $pid 가 없다"; return 1 }
+  owner=$(vmq_owner) || return 1
+  vmq_lock || return 1
+  {
+    vmq_sync $owner
+    if vmq_holds $owner "$@"; then
+      ok=1
+      for vm in ${=Q_vms[$REPLY]}; do
+        f="$VMQ_DIR/$vm/$REPLY"
+        vmq_write $f "$(vmq_field $f owner)" "$(vmq_field $f label)" "$(vmq_field $f created)" "$(vmq_field $f need)" "$(vmq_field $f held)" $EPOCHSECONDS "$(vmq_field $f procs)" $chain
+      done
+      vmq_log "사슬 $owner ${Q_vms[$REPLY]} $chain"
+    fi
+  } always { vmq_unlock }
+  (( ok ))
+}
+# 내가 잡은 차례에 적힌 사슬: vmq_chain_of <대상>… → 적힌 `<PID>@<시작 시각>` 을 찍는다(없으면 빈 줄). 차례가 없으면 1.
+vmq_chain_of() {
+  local owner ok=0 out=
+  owner=$(vmq_owner) || return 1
+  vmq_lock || return 1
+  {
+    vmq_sync $owner
+    vmq_holds $owner "$@" && { ok=1; out=$(vmq_field ${Q_file[$REPLY]} chain) }
+  } always { vmq_unlock }
+  (( ok )) && print -r -- $out
 }
 
 # 프로젝트 도구가 제어 명령 앞에서 부른다: vmq_require <대상>… 차례를 가졌으면 시각과 이 셸 프로세스($$)를 적고 0, 아니면 이유를
 # stderr 에 쓰고 1. 적은 프로세스가 살아 있는 동안 차례는 만료되지 않는다(위 「만료」, 상한 VM_QUEUE_HOLD_MAX).
+# 차례보다 먼저 부른 도구의 판을 본다(위 vmq_tool_current).
 vmq_require() {
   [[ ${VM_QUEUE_INTERNAL:-} == 1 ]] && return 0
   local owner vm ok=0
+  vmq_tool_current || return 1
   owner=$(vmq_owner) || return 1
   vmq_lock || return 1
   {

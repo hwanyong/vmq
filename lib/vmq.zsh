@@ -61,15 +61,22 @@ vmq_load_registry() {
 }
 vmq_load_registry
 # Mac 으로 가는 ssh 의 선택 사항: vmq_ssh_opts <식별 주소> → reply. 식별 주소(resources.tsv 둘째 열)는 ssh 의 목적지로 그대로 쓰고,
-# 이 함수가 돌려준 선택 사항을 그 앞에 끼운다: `vmq_ssh_opts $h; ssh "${reply[@]}" $h …`. hosts.tsv 의 주소를 앞부터 2초씩
-# 시도해(nc -z -G 2 <주소> 22) 된 주소가 식별 주소면 reply=()(지금과 같음), 다른 주소면 reply=(-o HostName=<그 주소> -o HostKeyAlias=<식별 주소>)
-# 로 같은 키를 확인한다. 아무것도 안 되면 reply=() 이고 종료 코드 1(ssh 가 그 실패를 그대로 낸다). hosts.tsv 에 없는 식별 주소는 reply=().
+# 이 함수가 돌려준 선택 사항을 그 앞에 끼운다: `vmq_ssh_opts $h; ssh "${reply[@]}" $h …`. reply 는 늘 VMQ_SSH_BASE(아래)로 시작한다.
+# 그 뒤에 hosts.tsv 의 주소를 앞부터 2초씩 시도해(nc -z -G 2 <주소> 22) 된 주소가 식별 주소면 더하는 것이 없고, 다른 주소면
+# -o HostName=<그 주소> -o HostKeyAlias=<식별 주소> 를 더해 같은 키를 확인한다. 아무것도 안 되면 종료 코드 1(ssh 가 그 실패를 그대로 낸다).
+# hosts.tsv 에 없는 식별 주소는 VMQ_SSH_BASE 만이다.
 # Thunderbolt 브리지가 끊길 때 LAN 주소로 가기 위해서다(2026-10-23 사용자, poieve task_1792776616889_c8rezv). 2026-10-23 잰 시간:
 # 브리지가 살아 있으면 0.02초, LAN 주소 0.08초, 닿지 않는 주소 2.02초.
+# VMQ_SSH_BASE: Mac · VM 으로 가는 ssh 의 공통 선택 사항. 암호를 묻지 않고(BatchMode), 연결은 5초 안에 열리지 않으면 끊고(ConnectTimeout),
+# 응답하지 않는 상대는 15초마다 묻고 4번 답이 없으면 끊는다(첫 묻기까지 15초를 더해 약 75초, 종료 코드 255). keepalive 는 원격 명령과
+# 따로 sshd 가 답하므로 오래 걸리는 정상 명령은 끊기지 않는다. 전에는 poieve 의 tools/vm.sh 만 이 값을 갖고(bug_1792775158909_k5mr0k)
+# 다른 자리의 Mac mini ssh 에는 없어, 원격 rm 이 끝난 뒤에도 ssh 가 35분 남았다(2026-10-23, poieve bug_1792793532531_0ks4u2).
+# 그래서 자리마다 붙이지 않고 이곳 한 곳에서 준다. 부르는 쪽이 게스트(VM)로 가는 ssh 에도 같은 값을 쓸 때는 이 배열을 그대로 쓴다.
+typeset -ga VMQ_SSH_BASE=(-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
 VMQ_HOSTS_FILE=${VMQ_HOSTS_FILE:-$VMQ_ROOT/hosts.tsv}
 vmq_ssh_opts() {
   local id=$1 key addrs a
-  reply=()
+  reply=($VMQ_SSH_BASE)
   [[ -r $VMQ_HOSTS_FILE ]] || return 0
   while IFS=$'\t' read -r key addrs; do
     [[ $key == $id ]] && break
@@ -78,7 +85,7 @@ vmq_ssh_opts() {
   [[ -n $addrs ]] || return 0
   for a in ${=addrs}; do
     nc -z -G 2 $a 22 >/dev/null 2>&1 || continue
-    [[ $a == $id ]] || reply=(-o "HostName=$a" -o "HostKeyAlias=$id")
+    [[ $a == $id ]] || reply+=(-o "HostName=$a" -o "HostKeyAlias=$id")
     return 0
   done
   return 1

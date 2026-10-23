@@ -9,7 +9,7 @@
 | 경로 | 무엇 |
 |---|---|
 | `resources.tsv` | 대상 목록. 줄마다 `<이름>` · `<그 대상이 있는 Mac 의 SSH 주소>` · `<역할, 쉼표로>`(탭). 이 Mac 에 하나뿐이고, 대상을 더하거나 지우면 이 파일만 고친다 |
-| `hosts.tsv` | Mac 의 SSH 주소 목록. 줄마다 `<식별 주소>`(`resources.tsv` 둘째 열, known_hosts 의 키 이름) · `<시도할 주소, 공백으로, 앞부터>`(탭). `lib/vmq.zsh` 의 `vmq_ssh_opts <식별 주소>` 가 앞부터 2초씩 시도해 된 주소를 고르고, 식별 주소가 아니면 `-o HostName=<그 주소> -o HostKeyAlias=<식별 주소>` 를 `reply` 로 돌려준다. ssh 의 목적지는 식별 주소 그대로 두고 그 선택 사항만 앞에 끼운다(`vmq_ssh_opts $h; ssh "${reply[@]}" $h …`). Thunderbolt 브리지가 끊기면 LAN 주소로 가기 위해서다(2026-10-23 사용자 「간혹 썬더볼트 브릿지 연결이 끊길 때가 있어. 이 경우 일반 이더넷 네트워크 IP로 접근해야 돼.」, poieve `task_1792776616889_c8rezv`) |
+| `hosts.tsv` | Mac 의 SSH 주소 목록. 줄마다 `<식별 주소>`(`resources.tsv` 둘째 열, known_hosts 의 키 이름) · `<시도할 주소, 공백으로, 앞부터>`(탭). `lib/vmq.zsh` 의 `vmq_ssh_opts <식별 주소>` 가 앞부터 2초씩 시도해 된 주소를 고르고, 식별 주소가 아니면 `-o HostName=<그 주소> -o HostKeyAlias=<식별 주소>` 를 더한다. `reply` 는 늘 `VMQ_SSH_BASE`(`-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4`, 응답 없는 연결은 약 75초에 종료 코드 255)로 시작하므로 부르는 쪽은 이 선택 사항을 따로 붙이지 않는다(2026-10-23, poieve `bug_1792793532531_0ks4u2`: 붙이지 않은 자리의 ssh 가 35분 남았다). ssh 의 목적지는 식별 주소 그대로 두고 그 선택 사항만 앞에 끼운다(`vmq_ssh_opts $h; ssh "${reply[@]}" $h …`). Thunderbolt 브리지가 끊기면 LAN 주소로 가기 위해서다(2026-10-23 사용자 「간혹 썬더볼트 브릿지 연결이 끊길 때가 있어. 이 경우 일반 이더넷 네트워크 IP로 접근해야 돼.」, poieve `task_1792776616889_c8rezv`) |
 | `bin/vmq` | 명령. `vmq help` 가 사용법을 찍는다 |
 | `lib/vmq.zsh` | 큐 · 배정 · `vmq_require`. 프로젝트 도구가 `source` 한다 |
 | `lib/peek.zsh` | 차례 없는 읽기의 판별(`peek_allowed`). 프로젝트 도구가 `source` 한다 |

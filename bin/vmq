@@ -64,8 +64,10 @@ covers() {
 
 # 차례를 만들거나 바꾼다: register <소유자> <묶음>… → 새로 만들었으면 0, 이미 있었으면 3, 거절이면 1
 # 잡은 뒤에는 바꾸지 않는다: 잡은 채 더 받으면 VM 마다의 순서가 어긋나 교착이 생길 수 있다. 기다리는 동안에는 같은 일련번호로 바꾼다.
+# 잡은 차례에 적힌 사슬(chain, lib/vmq.zsh 의 vmq_chain_mark)이 끝났으면 4: 그 사슬의 뒷정리가 아직 그 차례로 VM 을 끄고 되돌리는 중이라
+# 같은 소유자에게도 넘기지 않는다. 부른 쪽(register_wait)은 그 차례가 놓일 때까지 기다린 뒤 새로 등록한다(poieve tracker bug_1792779968019_9ycb6f).
 register() {
-  local owner=$1 vm k f seq rc=3 c all=()
+  local owner=$1 vm k f seq rc=3 c chain all=()
   shift
   local need="$*"
   vmq_all_members "$@"; all=($reply)
@@ -73,7 +75,10 @@ register() {
   {
     vmq_sync $owner
     k=$REPLY
-    if [[ -n $k && -n ${Q_held[$k]} ]]; then
+    chain=${k:+$(vmq_field ${Q_file[$k]} chain)}
+    if [[ -n $k && -n ${Q_held[$k]} && -n $chain ]] && ! vmq_procs_alive $chain >/dev/null; then
+      rc=4
+    elif [[ -n $k && -n ${Q_held[$k]} ]]; then
       if ! covers "${Q_held[$k]}" "$@"; then
         print -u2 "제어 대상 큐: 이 소유자는 이미 ${Q_held[$k]} 를 잡았다. $need 가 필요하면 vmq release 한 뒤 함께 acquire 한다"
         rc=1
@@ -100,6 +105,20 @@ register() {
     fi
   } always { vmq_unlock }
   return $rc
+}
+
+# register 가 4(끝난 사슬의 차례가 아직 놓이지 않음)이면 놓일 때까지 2초마다 다시 등록한다: register_wait <소유자> <제한 초(0 이면 끝없이)> <묶음>…
+# 돌려주는 값은 register 와 같고, 제한 안에 놓이지 않으면 75.
+register_wait() {
+  local owner=$1 limit=$2 start=$EPOCHSECONDS rc told=0
+  shift 2
+  while true; do
+    register $owner "$@"; rc=$?
+    (( rc == 4 )) || return $rc
+    (( told )) || { print -u2 "제어 대상 큐: 이 소유자의 끝난 사슬이 쥔 차례가 아직 놓이지 않았다(그 사슬의 뒷정리가 VM 을 끄고 되돌리는 중). 놓인 뒤 새로 받는다"; told=1 }
+    (( limit > 0 && EPOCHSECONDS - start >= limit )) && return 75
+    sleep 2
+  done
 }
 
 # 차례를 잡을 때까지 기다린다: hold <소유자> <제한 초(0 이면 끝없이)>. 잡으면 REPLY 에 받은 VM.
@@ -150,8 +169,9 @@ acquire)
   (( ${#reply} )) || usage
   expand_groups $reply || exit 1
   owner=$(vmq_owner) || exit 1
-  register $owner $groups; rc=$?
+  register_wait $owner $wait_s $groups; rc=$?
   (( rc == 1 )) && exit 1
+  (( rc == 75 )) && exit 75
   hold $owner $wait_s; rc=$?
   case $rc in
   0) print "잡음: ${REPLY// /, } (소유자 $owner). 끝나면 vmq release" ;;
@@ -182,7 +202,7 @@ release)
       # 일부만 놓으면 남은 VM 으로 held · need 를 줄인다(놓은 VM 을 다시 기다리지 않게)
       if (( ${#left} && ${#gone} )) && [[ -n ${Q_held[$k]} ]]; then
         f="$VMQ_DIR/${left[1]}/$k"
-        for vm in $left; do vmq_write "$VMQ_DIR/$vm/$k" $owner "$(vmq_field $f label)" "$(vmq_field $f created)" "$left" "$left" "$(vmq_field $f active)" "$(vmq_field $f procs)"; done
+        for vm in $left; do vmq_write "$VMQ_DIR/$vm/$k" $owner "$(vmq_field $f label)" "$(vmq_field $f created)" "$left" "$left" "$(vmq_field $f active)" "$(vmq_field $f procs)" "$(vmq_field $f chain)"; done
       fi
     fi
     (( ${#gone} )) && vmq_log "놓음 $owner ${(j: :)gone}"
@@ -236,7 +256,7 @@ run)
   (( ${#specs} && ${#cmdline} )) || usage
   expand_groups $specs || exit 1
   owner=$(vmq_owner) || exit 1
-  register $owner $groups; rc=$?
+  register_wait $owner 0 $groups; rc=$?
   (( rc == 1 )) && exit 1
   mine=$(( rc == 0 ))
   hold $owner 0 || exit 1

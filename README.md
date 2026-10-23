@@ -55,6 +55,8 @@
 
 ## 시험
 
+전역 vmq 는 살아 있는 checkout(`~/.claude/tools/vmq`)에서 고치지 않는다. 떠 있는 모든 VM 사슬이 vm.sh 를 부를 때마다 그 파일을 source 하므로 반쯤 고친 파일이 바로 적용되고, 같은 파일을 고친 다른 세션의 커밋에 섞여 들어간다(2026-10-23 `318ce43` 에 9ycb6f 의 `vmq_chain_mark` 가 섞임). `git -C ~/.claude/tools/vmq worktree add ~/.claude/tools/vmq-worktrees/<이름>` 의 별도 작업 트리에서 고치고, 그 작업 트리의 `bin/vmq` 로 아래 시험을 돌린 뒤 main 에 합친다.
+
 차례표를 실제 것과 따로 두고 돌린다(`VM_QUEUE_DIR`).
 
 | 시험 | 명령 | 2026-10-12 01:30 결과 |

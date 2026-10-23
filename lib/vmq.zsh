@@ -60,6 +60,30 @@ vmq_load_registry() {
   done < "$VMQ_REGISTRY"
 }
 vmq_load_registry
+# Mac 으로 가는 ssh 의 선택 사항: vmq_ssh_opts <식별 주소> → reply. 식별 주소(resources.tsv 둘째 열)는 ssh 의 목적지로 그대로 쓰고,
+# 이 함수가 돌려준 선택 사항을 그 앞에 끼운다: `vmq_ssh_opts $h; ssh "${reply[@]}" $h …`. hosts.tsv 의 주소를 앞부터 2초씩
+# 시도해(nc -z -G 2 <주소> 22) 된 주소가 식별 주소면 reply=()(지금과 같음), 다른 주소면 reply=(-o HostName=<그 주소> -o HostKeyAlias=<식별 주소>)
+# 로 같은 키를 확인한다. 아무것도 안 되면 reply=() 이고 종료 코드 1(ssh 가 그 실패를 그대로 낸다). hosts.tsv 에 없는 식별 주소는 reply=().
+# Thunderbolt 브리지가 끊길 때 LAN 주소로 가기 위해서다(2026-10-23 사용자, poieve task_1792776616889_c8rezv). 2026-10-23 잰 시간:
+# 브리지가 살아 있으면 0.02초, LAN 주소 0.08초, 닿지 않는 주소 2.02초.
+VMQ_HOSTS_FILE=${VMQ_HOSTS_FILE:-$VMQ_ROOT/hosts.tsv}
+vmq_ssh_opts() {
+  local id=$1 key addrs a
+  reply=()
+  [[ -r $VMQ_HOSTS_FILE ]] || return 0
+  while IFS=$'\t' read -r key addrs; do
+    [[ $key == $id ]] && break
+    addrs=
+  done < "$VMQ_HOSTS_FILE"
+  [[ -n $addrs ]] || return 0
+  for a in ${=addrs}; do
+    nc -z -G 2 $a 22 >/dev/null 2>&1 || continue
+    [[ $a == $id ]] || reply=(-o "HostName=$a" -o "HostKeyAlias=$id")
+    return 0
+  done
+  return 1
+}
+
 # 역할을 가진 대상, 이름 순서: vmq_with_role <역할>
 vmq_with_role() { local v; for v in ${(ok)VMQ_HOST}; do vmq_has "${VMQ_ROLES[$v]}" $1 && print -r -- $v; done; true }
 

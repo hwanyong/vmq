@@ -12,6 +12,7 @@
 #   vmq mine                             내가 잡은 VM 을 묶음 순서로 한 줄에 찍는다. 잡지 않았으면 종료 코드 1
 #   vmq release [<vm>…]                  내 차례를 지운다. VM 을 주면 그 VM 만 놓는다
 #   vmq status [<vm>…]                   VM 마다 잡은 소유자와 기다리는 소유자
+#   vmq ended <vm>                       내 그 VM 차례가 마지막에 끝난 사건(놓음 · 만료 · 강제로놓음) · 시각 · 그 뒤 잡은 다른 소유자(없으면 -)
 #   vmq run [-l 설명] <묶음>… -- <명령…>  차례를 잡을 때까지 기다린 뒤 명령을 실행하고, 이 명령이 받은 차례면 놓는다.
 #                                                      명령에는 받은 VM 이 환경 변수 VM_QUEUE_GRANTED(공백으로 나눈 목록)로 간다
 #   vmq force-release <vm>              그 VM 을 잡은 차례를 지운다. 사용자가 지시할 때만 쓴다
@@ -246,6 +247,32 @@ run)
   VM_QUEUE_GRANTED=$granted "${cmdline[@]}"; rc=$?
   (( mine )) && "${0:A}" release ${=granted} >/dev/null
   exit $rc
+  ;;
+ended)
+  # 이 소유자의 그 VM 차례가 마지막에 어떻게 끝났는지를 차례표의 log 에서 읽는다(기록 형식은 이 파일 · lib/vmq.zsh 의 vmq_log 줄이 정한다).
+  # 사건 · 시각 · 그 뒤 그 VM 을 잡은 다른 소유자(없으면 -)를 한 줄로 찍는다: `만료 2026-10-23 07:13:08 -`. 그 뒤 이 소유자가 다시 잡았거나
+  # 끝난 차례가 없으면 종료 코드 1. poieve 의 vm_chain_watch 가 사슬이 놓은 것과 만료로 지워진 것을 가를 때 부른다(bug_1792774871149_2f64d4).
+  vm=${1:?대상}; [[ -n ${VMQ_HOST[$vm]:-} ]] || { print -u2 "모르는 대상: $vm"; exit 1 }
+  owner=$(vmq_owner) || exit 1
+  [[ -r $VMQ_DIR/log ]] || { print -u2 "차례표의 log 가 없다: $VMQ_DIR/log"; exit 1 }
+  awk -v vm=$vm -v me=$owner '
+    # 잡음 <소유자> <VM>…[ (설명)] · 놓음 <소유자> <VM>… · 만료 <VM> <소유자> (…) · 강제로 놓음 <VM>… <소유자> (요청 …)
+    function has(from, to,   i) { for (i = from; i <= to; i++) if ($i == vm) return 1; return 0 }
+    function finish(e) { ev = e; at = $1 " " $2; next_owner = "-"; ended = 1 }
+    $3 == "잡음" {
+      last = NF; for (i = 5; i <= NF; i++) if (substr($i, 1, 1) == "(") { last = i - 1; break }
+      if (!has(5, last)) next
+      if ($4 == me) ended = 0; else if (ended && next_owner == "-") next_owner = $4
+      next
+    }
+    $3 == "놓음" && $4 == me && has(5, NF) { finish("놓음"); next }
+    $3 == "만료" && $4 == vm && $5 == me { finish("만료"); next }
+    $3 == "강제로" && $4 == "놓음" {
+      for (i = 5; i <= NF; i++) if (substr($i, 1, 3) == "(요청") break
+      if ($(i - 1) == me && has(5, i - 2)) finish("강제로놓음")
+    }
+    END { if (!ended) exit 1; print ev, at, next_owner }
+  ' "$VMQ_DIR/log" || { print -u2 "$vm 에서 끝난 차례가 없다(소유자 $owner, 기록 $VMQ_DIR/log)"; exit 1 }
   ;;
 force-release)
   vm=${1:?대상}; [[ -n ${VMQ_HOST[$vm]:-} ]] || { print -u2 "모르는 대상: $vm"; exit 1 }

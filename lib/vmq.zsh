@@ -92,7 +92,7 @@ vmq_ssh_opts() {
 }
 # Mac 으로 가는 ssh 를 실행한다: vmq_ssh <식별 주소> [ssh 선택 사항…] [원격 명령…] → ssh 의 종료 코드. 선택 사항은 시도마다 vmq_ssh_opts 가
 # 정한다. ssh 는 목적지 뒤의 선택 사항도 받는다(`vmq_ssh $h -n uptime`). 원격 명령의 stdout · stderr 는 그대로 지나가고, ssh 자신의
-# 진단(-E 로 받은 것)은 시도마다 stderr 에 옮긴다. scp 는 -E 가 없어 이 함수를 쓰지 않는다.
+# 진단(-E 로 받은 것)은 시도마다 stderr 에 옮긴다. 다시 시도의 몸통은 아래 vmq_ssh_retry 이고, scp · 게스트로 가는 ssh 는 그것을 직접 부른다.
 # 배너 교환에서 끝난 연결(종료 코드 255 와 「during banner exchange」)만 새 연결로 다시 시도한다. 배너 전에는 원격 명령이 시작되지 않았고
 # 표준 입력도 읽지 않았다(2026-10-24 재현: 배너 전에 끝난 ssh 다음의 ssh 가 here-string 11 바이트를 그대로 받았다). 첫 시도부터
 # VMQ_SSH_RETRY_S 초가 지나면 더 시도하지 않는다. 다시 시도할 때마다 stderr 와 차례표 기록(vmq_log)에 횟수와 경과 초를 적는다.
@@ -104,33 +104,42 @@ vmq_ssh_opts() {
 # 약 5.1초에 시작한다(ConnectTimeout 5, 2026-10-24 깨 보기 poieve build/0a28779b/skyztm/run1.log). 늘 실패하면 시도마다 약 5.1초라
 # (같은 깨 보기의 한도 12초에서 3번 시도 · 15.2초) 30 이면 6번째 시도(약 25.5초에 시작)까지 간다. 2번째 시도가 실패한 경우는 아직 재지 못했다.
 # 다시 재는 법: 차례표 기록에서
-# `grep -E 'ssh [^ ]+: [0-9]+번 시도' "$VMQ_DIR/log"` 로 시도 횟수 · 경과 초 · 종료 코드를 모아, 몇 번째 시도에서 됐는지와 한도에 걸려
+# `grep -E '(ssh|scp) [^ ]+: [0-9]+번 시도' "$VMQ_DIR/log"` 로 시도 횟수 · 경과 초 · 종료 코드를 모아, 몇 번째 시도에서 됐는지와 한도에 걸려
 # 종료 코드 255 로 끝난 것이 있는지 본다. 한도에 걸린 것이 있으면 그 경과 초를 근거로 값을 다시 정한다.
 VMQ_SSH_RETRY_S=${VMQ_SSH_RETRY_S:-30}
-vmq_ssh() {
-  local id=$1 err rc n=0 t0=$EPOCHREALTIME msg
-  shift
-  err=$(mktemp -t vmq-ssh) || return 255
+# 다시 시도의 몸통: vmq_ssh_retry <기록 이름> <준비 함수> [준비 함수 인자…] → 그 명령의 종료 코드. Mac 으로 가는 vmq_ssh 와, 프로젝트 도구가
+# 게스트(VM)로 가는 ssh · scp(poieve tools/vm.sh 의 vssh · push)가 같은 규칙을 쓰려고 한 곳에 둔다(poieve bug_1792822845742_xbheol).
+# <준비 함수> 는 시도마다 불려 reply 에 실행할 명령 전체를 넣는다. 그 명령의 ssh 진단은 $VMQ_SSH_ERR 파일로 가야 한다: ssh 는
+# `-E "$VMQ_SSH_ERR"`, scp 는 `-S <vmq>/bin/vmq-ssh-e`(그 파일로 -E 를 붙여 ssh 를 실행한다). 그 파일은 시도마다 stderr 에 옮긴다.
+# 기록 이름은 「ssh <식별 주소>」 · 「scp <VM>」 처럼 공백 없는 대상을 붙인다(다시 재는 grep 이 그 꼴을 찾는다).
+vmq_ssh_retry() {
+  local name=$1 prep=$2 rc n=0 t0=$EPOCHREALTIME msg
+  shift 2
+  local -x VMQ_SSH_ERR
+  VMQ_SSH_ERR=$(mktemp -t vmq-ssh) || return 255
   while :; do
     (( ++n ))
-    vmq_ssh_opts $id || true
-    # set -e 인 셸에서 불러도 실패한 ssh 에서 끝나지 않게 종료 코드를 목록으로 받는다
-    ssh -E $err "${reply[@]}" $id "$@" && rc=0 || rc=$?
-    [[ -s $err ]] && cat -- $err >&2
-    (( rc == 255 )) && grep -q 'during banner exchange' $err && (( EPOCHREALTIME - t0 < VMQ_SSH_RETRY_S )) || break
-    : >| $err
-    msg=$(printf 'ssh %s: 배너 교환에서 끝나 새 연결로 다시 시도(%d번째 시도, 첫 시도부터 %.1f초)' $id $(( n + 1 )) $(( EPOCHREALTIME - t0 )))
+    $prep "$@"
+    # set -e 인 셸에서 불러도 실패한 명령에서 끝나지 않게 종료 코드를 목록으로 받는다
+    "${reply[@]}" && rc=0 || rc=$?
+    [[ -s $VMQ_SSH_ERR ]] && cat -- $VMQ_SSH_ERR >&2
+    (( rc == 255 )) && grep -q 'during banner exchange' $VMQ_SSH_ERR && (( EPOCHREALTIME - t0 < VMQ_SSH_RETRY_S )) || break
+    : >| $VMQ_SSH_ERR
+    msg=$(printf '%s: 배너 교환에서 끝나 새 연결로 다시 시도(%d번째 시도, 첫 시도부터 %.1f초)' $name $(( n + 1 )) $(( EPOCHREALTIME - t0 )))
     print -u2 -r -- "vmq_ssh: $msg"
     vmq_log "$msg" 2>/dev/null || true
   done
   if (( n > 1 )); then
-    msg=$(printf 'ssh %s: %d번 시도, %.1f초, 종료 코드 %d' $id $n $(( EPOCHREALTIME - t0 )) $rc)
+    msg=$(printf '%s: %d번 시도, %.1f초, 종료 코드 %d' $name $n $(( EPOCHREALTIME - t0 )) $rc)
     print -u2 -r -- "vmq_ssh: $msg"
     vmq_log "$msg" 2>/dev/null || true
   fi
-  rm -f -- $err
+  rm -f -- $VMQ_SSH_ERR
   return $rc
 }
+# vmq_ssh 의 준비 함수: 시도마다 주소를 다시 고른다(Thunderbolt 브리지가 그 사이에 끊겼을 수 있다)
+vmq_ssh_cmd() { local id=$1; shift; vmq_ssh_opts $id || true; reply=(ssh -E "$VMQ_SSH_ERR" "${reply[@]}" $id "$@") }
+vmq_ssh() { vmq_ssh_retry "ssh $1" vmq_ssh_cmd "$@" }
 
 # 역할을 가진 대상, 이름 순서: vmq_with_role <역할>
 vmq_with_role() { local v; for v in ${(ok)VMQ_HOST}; do vmq_has "${VMQ_ROLES[$v]}" $1 && print -r -- $v; done; true }

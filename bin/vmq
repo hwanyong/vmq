@@ -14,6 +14,7 @@
 #   vmq status [<vm>…]                   VM 마다 잡은 소유자와 기다리는 소유자
 #   vmq ended <vm>                       내 그 VM 차례가 마지막에 끝난 사건(놓음 · 만료 · 강제로놓음) · 시각 · 그 뒤 잡은 다른 소유자(없으면 -)
 #   vmq run [-l 설명] <묶음>… -- <명령…>  차례를 잡을 때까지 기다린 뒤 명령을 실행하고, 이 명령이 받은 차례면 놓는다.
+#                                                      TERM · INT · HUP 으로 끝나도 놓는다(명령이 돌던 중이면 그 명령이 끝난 뒤). KILL 은 LEASE 로 만료된다.
 #                                                      명령에는 받은 VM 이 환경 변수 VM_QUEUE_GRANTED(공백으로 나눈 목록)로 간다
 #   vmq force-release <vm>              그 VM 을 잡은 차례를 지운다. 사용자가 지시할 때만 쓴다
 #   vmq list                            대상 목록(이름 · Mac · 역할)
@@ -24,7 +25,10 @@ set -uo pipefail
 source "${0:A:h:h}/lib/vmq.zsh"
 cmd=${1:-status}; (( $# )) && shift
 
-usage() { sed -n '2,22p' "${0:A}"; exit 2 }
+# 이 스크립트의 경로. 함수 안의 $0 은 함수 이름이라(zsh FUNCTION_ARGZERO) 여기서 받아 둔다. 전에는 usage 가 함수 안의 $0 을 써
+# 사용법 대신 「sed: …/usage: No such file or directory」 를 냈다
+self=${0:A}
+usage() { sed -n '2,23p' "$self"; exit 2 }
 
 # 옵션: -w 초 · -l 설명. 나머지는 reply 에 남는다.
 wait_s=90 label=${VM_QUEUE_LABEL:-}
@@ -259,13 +263,22 @@ run)
   register_wait $owner 0 $groups; rc=$?
   (( rc == 1 )) && exit 1
   mine=$(( rc == 0 ))
-  hold $owner 0 || exit 1
+  # TERM · INT · HUP 으로 끝나도 이 명령이 만든 차례(기다리는 요청이든 잡은 차례든)를 놓는다. 전에는 명령이 돌아온 뒤에만 놓아,
+  # TaskStop(프로세스 그룹에 TERM) · pkill 로 끝난 run 의 SMB 빌드 차례가 LEASE 1200초 동안 남았다(2026-10-23 두 번, bug_1792813277239_fyx5wg).
+  # zsh 는 명령(자식)이 도는 동안 받은 신호의 trap 을 그 명령이 끝난 뒤 실행하므로, run 에만 TERM 이 가면 명령이 끝날 때까지 차례를 쥔다.
+  # KILL 은 받을 수 없고 그때 명령이 아직 도는지도 알 수 없어 전처럼 LEASE 로 만료된다.
+  granted=
+  run_release() { (( mine )) && "$self" release ${=granted} >/dev/null 2>&1; true }
+  trap 'run_release; exit 129' HUP
+  trap 'run_release; exit 130' INT
+  trap 'run_release; exit 143' TERM
+  hold $owner 0 || { run_release; exit 1 }
   granted=$REPLY
   # 명령이 도는 동안 이 프로세스가 차례를 쥔다(명령이 vmq_require 를 부르지 않아도 만료되지 않게)
   vmq_lock || exit 1
   { vmq_sync $owner; vmq_attach $REPLY $$ } always { vmq_unlock }
   VM_QUEUE_GRANTED=$granted "${cmdline[@]}"; rc=$?
-  (( mine )) && "${0:A}" release ${=granted} >/dev/null
+  run_release
   exit $rc
   ;;
 ended)

@@ -90,6 +90,41 @@ vmq_ssh_opts() {
   done
   return 1
 }
+# Mac 으로 가는 ssh 를 실행한다: vmq_ssh <식별 주소> [ssh 선택 사항…] [원격 명령…] → ssh 의 종료 코드. 선택 사항은 시도마다 vmq_ssh_opts 가
+# 정한다. ssh 는 목적지 뒤의 선택 사항도 받는다(`vmq_ssh $h -n uptime`). 원격 명령의 stdout · stderr 는 그대로 지나가고, ssh 자신의
+# 진단(-E 로 받은 것)은 시도마다 stderr 에 옮긴다. scp 는 -E 가 없어 이 함수를 쓰지 않는다.
+# 배너 교환에서 끝난 연결(종료 코드 255 와 「during banner exchange」)만 새 연결로 다시 시도한다. 배너 전에는 원격 명령이 시작되지 않았고
+# 표준 입력도 읽지 않았다(2026-10-24 재현: 배너 전에 끝난 ssh 다음의 ssh 가 here-string 11 바이트를 그대로 받았다). 첫 시도부터
+# VMQ_SSH_RETRY_S 초(기본 30, 정한 값)가 지나면 더 시도하지 않는다. 다시 시도할 때마다 stderr 와 차례표 기록(vmq_log)에 횟수와 경과 초를 적는다.
+# 까닭(2026-10-23 08:00 ~ 20:06 PDT, Mac Studio 커널 로그): 이 Mac 의 ssh 흐름 14767개 중 81개에서 들어오는 패킷이 「reason: NECP」 로
+# 버려졌다. 연결 직후 버림이 시작된 19개 중 3개는 ConnectTimeout 5 안에 배너를 받지 못해 끝났고(poieve bug_1792810184598_skyztm, gkmbfo
+# 사슬의 「주소 없음」), 세 번 모두 1.6 ~ 4.4초 뒤에 연 새 연결은 정상이었다. 같은 연결을 계속 기다린 것 중에는 60초 ServerAlive 로 끊긴 것이
+# 4개라 시간 제한을 늘리지 않고 새 연결로 다시 시도한다. 버림의 원인(그 프로세스 계열의 Local Network 판정)은 poieve bug_1792778607255_ahb398 이 갖는다.
+VMQ_SSH_RETRY_S=${VMQ_SSH_RETRY_S:-30}
+vmq_ssh() {
+  local id=$1 err rc n=0 t0=$EPOCHREALTIME msg
+  shift
+  err=$(mktemp -t vmq-ssh) || return 255
+  while :; do
+    (( ++n ))
+    vmq_ssh_opts $id || true
+    # set -e 인 셸에서 불러도 실패한 ssh 에서 끝나지 않게 종료 코드를 목록으로 받는다
+    ssh -E $err "${reply[@]}" $id "$@" && rc=0 || rc=$?
+    [[ -s $err ]] && cat -- $err >&2
+    (( rc == 255 )) && grep -q 'during banner exchange' $err && (( EPOCHREALTIME - t0 < VMQ_SSH_RETRY_S )) || break
+    : >| $err
+    msg=$(printf 'ssh %s: 배너 교환에서 끝나 새 연결로 다시 시도(%d번째 시도, 첫 시도부터 %.1f초)' $id $(( n + 1 )) $(( EPOCHREALTIME - t0 )))
+    print -u2 -r -- "vmq_ssh: $msg"
+    vmq_log "$msg" 2>/dev/null || true
+  done
+  if (( n > 1 )); then
+    msg=$(printf 'ssh %s: %d번 시도, %.1f초, 종료 코드 %d' $id $n $(( EPOCHREALTIME - t0 )) $rc)
+    print -u2 -r -- "vmq_ssh: $msg"
+    vmq_log "$msg" 2>/dev/null || true
+  fi
+  rm -f -- $err
+  return $rc
+}
 
 # 역할을 가진 대상, 이름 순서: vmq_with_role <역할>
 vmq_with_role() { local v; for v in ${(ok)VMQ_HOST}; do vmq_has "${VMQ_ROLES[$v]}" $1 && print -r -- $v; done; true }

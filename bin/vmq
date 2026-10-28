@@ -155,7 +155,7 @@ waiting_line() {
   print "기다리는 중: 요청 ${Q_need[$k]}"
   vmq_all_members ${=Q_need[$k]}
   for vm in $reply; do print "  $vm: $(vmq_holder_line $vm)$( [[ ${Q_busy[$vm]:-} == "~"* ]] && print ", 오래 기다린 차례 ${${Q_busy[$vm]#\~}#*-} 가 맡아 둠")"; done
-  print "acquire 는 같은 명령을 다시 실행해 이어서 기다린다. 잡은 쪽의 차례는 마지막 활동에서 ${VMQ_LEASE}초가 지나면 지워진다(그 차례를 쥔 프로세스가 살아 있으면 마지막 제어 명령에서 ${VMQ_HOLD_MAX}초까지는 지우지 않는다)"
+  print "acquire 는 같은 명령을 다시 실행해 이어서 기다린다. 잡은 쪽의 차례는 마지막 활동에서 ${VMQ_LEASE}초가 지나면 지워진다(그 차례를 쥔 프로세스가 살아 있으면 마지막 제어 명령 · 갱신에서 ${VMQ_HOLD_MAX}초까지는 지우지 않는다)"
 }
 
 case $cmd in
@@ -232,7 +232,7 @@ status)
       mark=""; [[ $o == $me ]] && mark=" ← 이 세션"
       a=$(vmq_field $f active)
       if alive=$(vmq_procs_alive "$(vmq_field $f procs)") && (( EPOCHSECONDS - ${a:-0} <= VMQ_HOLD_MAX )); then
-        lease_line="프로세스 $alive 가 살아 있어 만료되지 않음(마지막 제어 명령 $(( EPOCHSECONDS - a ))초 전, 상한 ${VMQ_HOLD_MAX}초)"
+        lease_line="프로세스 $alive 가 살아 있어 만료되지 않음(마지막 제어 명령 · 갱신 $(( EPOCHSECONDS - a ))초 전, 상한 ${VMQ_HOLD_MAX}초)"
       else
         lease_line="마지막 활동 $(vmq_idle $f)초 전, 만료까지 $(( VMQ_LEASE - $(vmq_idle $f) ))초"
       fi

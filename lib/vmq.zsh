@@ -16,7 +16,7 @@
 # 같은 Mac 의 짝으로 받을 때 쓴다(두 Mac 의 VM 은 서로 다른 NAT 망이라 섞인 짝은 페어링되지 않는다, poieve task_1792215878907_oe4o0d). 2026-10-12 사용자 지시 「VM 사용에 병목이 생긴다면, MacMini에 있는 VM으로도 사용해도 돼. 이러한 VM 할당을
 # 유동적으로 제어해서 큐의 항목을 이전하여 처리 속도를 원활하게 할 수 있도록 해」에 따라 후보 중 먼저 비는 대상을 준다.
 # 차례 파일: $VMQ_DIR/<후보>/<일련번호 10자리>-<소유자>. 후보마다 같은 내용의 파일을 둔다. 줄: owner · label · created ·
-# need(묶음을 공백으로, 후보를 쉼표로, 후보 안의 대상을 +로. `+` 가 없는 옛 요청은 대상 하나짜리 후보로 그대로 읽는다) · held(잡은 대상, 잡은 뒤에만) · active(마지막 제어 명령의 시각) · procs(그 제어 명령을 부른
+# need(묶음을 공백으로, 후보를 쉼표로, 후보 안의 대상을 +로. `+` 가 없는 옛 요청은 대상 하나짜리 후보로 그대로 읽는다) · held(잡은 대상, 잡은 뒤에만) · active(마지막 제어 명령 또는 vmq_keepalive 의 시각) · procs(그 제어 명령을 부른
 # 프로세스, `<PID>@<시작 시각>` 을 공백으로). 잡으면 받지 않은 후보의 파일을 지운다. 파일의 수정 시각이 마지막 활동이다.
 #
 # 배정(vmq_plan): 잡은 차례의 대상을 먼저 빼고, 기다리는 차례를 일련번호 순으로 보며 묶음마다 대상이 모두 비어 있는 후보를 하나씩 고른다. 모든 묶음이
@@ -30,7 +30,7 @@
 # 오래 활동이 없는 차례는 다음에 차례표를 읽는 쪽이 지운다.
 # 차례를 쥔 프로세스가 살아 있으면 활동이 없어도 지우지 않는다. vmq_require 가 자기를 부른 셸 프로세스($$, 스크립트면 그 스크립트)를
 # procs 에 적고, 차례표를 읽는 쪽(vmq_purge)은 그 프로세스가 살아 있으면 수정 시각을 새로 적는다. 그래서 그 프로세스가 끝나면 끝난 뒤
-# 차례표를 처음 읽은 때부터 VM_QUEUE_LEASE 초 뒤 지워진다(기다리는 쪽이 2초마다 읽는다). 마지막 제어 명령(active)에서 VM_QUEUE_HOLD_MAX 초
+# 차례표를 처음 읽은 때부터 VM_QUEUE_LEASE 초 뒤 지워진다(기다리는 쪽이 2초마다 읽는다). 마지막 제어 명령 · 갱신(active)에서 VM_QUEUE_HOLD_MAX 초
 # (기본 3600)가 지나면 프로세스가 살아 있어도 새로 적지 않아, 멈춘 스크립트의 차례도 그 뒤 VM_QUEUE_LEASE 초 안에 지워진다.
 # 2026-10-16 에 한 단계가 1200초 넘게 제어 명령을 부르지 않은 실행 중인 묶음의 차례가 지워지고, 다음 차례가 VM 을 되돌려 그 묶음이 깨졌다
 # (poieve tracker bug_1792137322422_fwsach). 상한 3600초는 VM 을 다루지 않는 긴 한 단계인 poieve 앱 빌드(최근 빌드 기록 15개 중 14개가
@@ -296,7 +296,7 @@ vmq_expand_joined() {
   print -r -- $out
 }
 
-# 마지막 활동에서 VMQ_LEASE 가 지난 차례를 지운다(잠금 안에서 부른다). 그 전에, 차례를 쥔 프로세스가 살아 있고 마지막 제어 명령에서
+# 마지막 활동에서 VMQ_LEASE 가 지난 차례를 지운다(잠금 안에서 부른다). 그 전에, 차례를 쥔 프로세스가 살아 있고 마지막 제어 명령 · 갱신에서
 # VMQ_HOLD_MAX 가 지나지 않은 차례는 수정 시각을 새로 적어 지우지 않는다.
 vmq_purge() {
   local vm f idle procs alive active why
@@ -308,7 +308,7 @@ vmq_purge() {
       if [[ -n $procs ]] && alive=$(vmq_procs_alive "$procs"); then
         active=$(vmq_field $f active)
         if (( EPOCHSECONDS - ${active:-0} <= VMQ_HOLD_MAX )); then touch -- "$f"; continue; fi
-        why=", 프로세스 $alive 는 살아 있지만 마지막 제어 명령에서 상한 ${VMQ_HOLD_MAX}초가 지났다"
+        why=", 프로세스 $alive 는 살아 있지만 마지막 제어 명령 · 갱신에서 상한 ${VMQ_HOLD_MAX}초가 지났다"
       fi
       idle=$(vmq_idle $f)
       (( idle > VMQ_LEASE )) || continue
@@ -486,6 +486,35 @@ vmq_chain_of() {
     vmq_holds $owner "$@" && { ok=1; out=$(vmq_field ${Q_file[$REPLY]} chain) }
   } always { vmq_unlock }
   (( ok )) && print -r -- $out
+}
+
+# 차례를 쥔 프로세스가 제어 명령 없이 오래 기다리는 동안 부른다: vmq_keepalive. 이 소유자가 잡은 차례의 procs 에 이 셸($$)이 살아 있는
+# 것으로 적혀 있을 때만 active(마지막 활동 확인)를 지금 시각으로 다시 적고 0, 아니면 1(아무것도 바꾸지 않는다). procs · chain 은 그대로 둔다.
+# 소유자가 다르거나(다른 세션) 같은 소유자라도 vmq_require 로 차례에 적히지 않은 프로세스는 남의 차례를 늘리지 못한다.
+# 부르는 간격은 VMQ_KEEPALIVE 초(VM_QUEUE_HOLD_MAX 의 1/6, 기본 600)다. 상한의 1/6 이라, 갱신이 다섯 번 잇달아 실패해야(차례표 잠금을
+# 얻지 못함 등) 상한에 걸린다.
+# 2026-10-28 에 VM 사슬의 한 단계(VM 안에서 조건을 보는 ssh 한 번, poieve car7gz 사슬의 waitc 3600초)가 제어 명령 없이 상한 3600초에 다가가,
+# 사슬이 도는 중에 차례가 지워질 수 있었다(2026-10-16 bug_1792137322422_fwsach 와 같은 일, poieve task_1793209230273_b2regj). 사슬의 단계는
+# 모두 poieve 의 chain_step 기다림 반복을 지나므로 그 반복 한 곳이 이 함수를 부른다. 부르는 프로세스가 끝나면 갱신도 멈춰 위 「만료」 규칙이 그대로
+# 걸린다. 살아 있지만 멈춘 사슬은 chain_step 의 단계 한도가 끝내므로, 갱신이 이어지는 시간은 그 사슬에 적힌 단계 한도의 합을 넘지 않는다.
+VMQ_KEEPALIVE=$(( VMQ_HOLD_MAX / 6 ))
+vmq_keepalive() {
+  [[ ${VM_QUEUE_INTERNAL:-} == 1 ]] && return 0
+  local owner me vm f ok=0
+  me=$(vmq_proc_id $$) || return 1
+  owner=$(vmq_owner) || return 1
+  vmq_lock || return 1
+  {
+    vmq_sync $owner
+    if [[ -n $REPLY && -n ${Q_held[$REPLY]:-} ]] && vmq_has "$(vmq_procs_alive "$(vmq_field ${Q_file[$REPLY]} procs)")" $me; then
+      ok=1
+      for vm in ${=Q_vms[$REPLY]}; do
+        f="$VMQ_DIR/$vm/$REPLY"
+        vmq_write $f "$(vmq_field $f owner)" "$(vmq_field $f label)" "$(vmq_field $f created)" "$(vmq_field $f need)" "$(vmq_field $f held)" $EPOCHSECONDS "$(vmq_field $f procs)" "$(vmq_field $f chain)"
+      done
+    fi
+  } always { vmq_unlock }
+  (( ok ))
 }
 
 # 프로젝트 도구가 제어 명령 앞에서 부른다: vmq_require <대상>… 차례를 가졌으면 시각과 이 셸 프로세스($$)를 적고 0, 아니면 이유를

@@ -3,14 +3,15 @@
 # 10.10.10.1 = Mac mini, 10.10.10.2 = Mac Studio(두 Mac 을 잇는 Thunderbolt 브리지).
 # 역할은 acquire 의 묶음에 @<역할> 로 적어 후보 묶음으로 쓴다(@server 는 역할 server 를 가진 대상 전부).
 # 대상을 더하거나 지우면 이 파일만 고친다. 그 대상을 다루는 프로젝트의 도구가 이 파일에서 이름 · Mac 을 읽는다.
-PoieveServer	10.10.10.2	server,poieve
+# 막음 PoieveServer	10.10.10.2	server,poieve
 PoieveServer2	10.10.10.1	server,poieve
-PoieveClient	10.10.10.2	client,poieve
+# 막음 PoieveClient	10.10.10.2	client,poieve
 PoieveClient2	10.10.10.1	client,poieve
 PoieveWebDocker	10.10.10.1	web,docker
 # 2026-10-15 사용자 지시 「내가 지시하기 전까진 Mac Studio VirtualBuddy를 사용하지마」(RAM 부족)로 Mac Studio 의 두 줄을 막았다가, 2026-10-17 사용자 지시 「mac studio의 virtualbuddy 사용이 가능해졌어. VM 활용을 mac mini와 겸용해서 사용 가능하니」 로 다시 열었다.
 # 2026-10-21 사용자 지시 「맥 스튜디오에서 VM 테스트 하지마. 램 용량 부족해.」 · 「VM 테스트는 맥미니에서만 진행하기」 로 Mac Studio 의 두 줄을 다시 막았다.
 # 2026-10-29 사용자 지시 「이제 macstudio에 있는 virtualbuddy 사용도 승인해줄게」 로 Mac Studio 의 두 줄을 다시 열었다.
+# 2026-10-30 사용자 지시 「virtualbuddy 사용은 다시 맥미니에서만 진행하도록 해. 무언가로 인한 프리징 문제가 발생했어」 로 Mac Studio 의 두 줄을 다시 막았다.
 # SMB 빌드 차례(2026-10-22, poieve CloudLLM-Claude-code task_1792646015965_4a2isj). VM 이 아니라 ~/LOCAL(Mac mini 의 SMB 공유) 위에서 동시에 도는
 # 빌드 수의 상한이다. poieve 의 tools/build.sh · tools/release.sh 가 맨 앞에서 `vmq run @smbbuild` 로 하나를 받은 동안만 돈다(tools/lib/common.zsh
 # 의 smb_build_slot). 줄 수가 상한이고 둘째 열은 빌드가 도는 Mac(Mac Studio)이다. 4 는 잰 범위 안의 값이다: Mac mini kern.num_files 가 빌드 없을 때

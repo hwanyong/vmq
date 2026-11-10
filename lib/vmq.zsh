@@ -47,6 +47,8 @@ VMQ_STARVE=${VM_QUEUE_STARVE:-1800}
 VMQ_HOLD_MAX=${VM_QUEUE_HOLD_MAX:-3600}
 # 차례표를 읽은 결과(vmq_scan). 키는 차례 파일 이름(<일련번호>-<소유자>).
 typeset -gA Q_vms Q_file Q_need Q_held Q_alloc Q_busy
+# 차례 파일 하나의 만료 판정(vmq_expiry)
+typeset -ga Q_exp
 
 # 대상 목록을 읽는다. VMQ_HOST[이름] = Mac, VMQ_ROLES[이름] = 역할(공백으로 나눔)
 typeset -gA VMQ_HOST VMQ_ROLES
@@ -299,22 +301,33 @@ vmq_expand_joined() {
 # 마지막 활동에서 VMQ_LEASE 가 지난 차례를 지운다(잠금 안에서 부른다). 그 전에, 차례를 쥔 프로세스가 살아 있고 마지막 제어 명령 · 갱신에서
 # VMQ_HOLD_MAX 가 지나지 않은 차례는 수정 시각을 새로 적어 지우지 않는다.
 vmq_purge() {
-  local vm f idle procs alive active why
+  local vm f why
   for vm in ${(ok)VMQ_HOST}; do
     vmq_tickets $vm
     for f in $reply; do
-      why=
-      procs=$(vmq_field $f procs)
-      if [[ -n $procs ]] && alive=$(vmq_procs_alive "$procs"); then
-        active=$(vmq_field $f active)
-        if (( EPOCHSECONDS - ${active:-0} <= VMQ_HOLD_MAX )); then touch -- "$f"; continue; fi
-        why=", 프로세스 $alive 는 살아 있지만 마지막 제어 명령 · 갱신에서 상한 ${VMQ_HOLD_MAX}초가 지났다"
-      fi
-      idle=$(vmq_idle $f)
-      (( idle > VMQ_LEASE )) || continue
-      rm -f -- "$f" && vmq_log "만료 $vm $(vmq_key_owner ${f:t}) (마지막 활동 ${idle}초 전$why)"
+      vmq_expiry $f
+      [[ ${Q_exp[1]} == holdMax ]] && { touch -- "$f"; continue }
+      (( Q_exp[4] > VMQ_LEASE )) || continue
+      why=; [[ -n ${Q_exp[3]} ]] && why=", 프로세스 ${Q_exp[3]} 는 살아 있지만 마지막 제어 명령 · 갱신에서 상한 ${VMQ_HOLD_MAX}초가 지났다"
+      rm -f -- "$f" && vmq_log "만료 $vm $(vmq_key_owner ${f:t}) (마지막 활동 ${Q_exp[4]}초 전$why)"
     done
   done
+}
+
+# 차례 파일 하나가 언제 무엇으로 만료되는지: vmq_expiry <파일> → Q_exp=(<근거> <만료까지 초> <살아 있는 프로세스> <근거의 시작에서 지난 초>).
+# 근거는 holdMax(쥔 프로세스가 살아 있고 마지막 제어 명령 · 갱신에서 VMQ_HOLD_MAX 가 지나지 않았다. 지난 초는 active 에서 잰다) 또는
+# lease(그 밖. 지난 초는 마지막 활동(수정 시각)에서 잰다). 살아 있는 프로세스는 근거가 lease 여도 적는다(상한이 지난 경우).
+# vmq_purge 와 vmq status(문장 · --json)가 이 한 곳의 판정을 쓴다.
+vmq_expiry() {
+  local f=$1 active alive idle
+  active=$(vmq_field $f active)
+  alive=$(vmq_procs_alive "$(vmq_field $f procs)") || alive=
+  if [[ -n $alive ]] && (( EPOCHSECONDS - ${active:-0} <= VMQ_HOLD_MAX )); then
+    Q_exp=(holdMax $(( VMQ_HOLD_MAX - EPOCHSECONDS + active )) "$alive" $(( EPOCHSECONDS - active )))
+    return
+  fi
+  idle=$(vmq_idle $f)
+  Q_exp=(lease $(( VMQ_LEASE - idle )) "$alive" $idle)
 }
 
 # 차례표를 읽는다(잠금 안에서). 이 형식 전의 차례(need 줄이 없다)는 파일이 있는 VM 을 하나씩 받는 요청이고, 그 VM 들 모두에서 맨 앞이면

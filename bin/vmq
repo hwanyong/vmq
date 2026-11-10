@@ -12,6 +12,7 @@
 #   vmq mine                             내가 잡은 VM 을 묶음 순서로 한 줄에 찍는다. 잡지 않았으면 종료 코드 1
 #   vmq release [<vm>…]                  내 차례를 지운다. VM 을 주면 그 VM 만 놓는다
 #   vmq status [<vm>…]                   VM 마다 잡은 소유자와 기다리는 소유자
+#   vmq status --json [<vm>…]            같은 판정을 요청(차례) 단위 JSON 한 개로 찍는다. 형식은 README.md 「status --json」
 #   vmq ended <vm>                       내 그 VM 차례가 마지막에 끝난 사건(놓음 · 만료 · 강제로놓음) · 시각 · 그 뒤 잡은 다른 소유자(없으면 -)
 #   vmq run [-l 설명] <묶음>… -- <명령…>  차례를 잡을 때까지 기다린 뒤 명령을 실행하고, 이 명령이 받은 차례면 놓는다.
 #                                                      TERM · INT · HUP 으로 끝나도 놓는다(명령이 돌던 중이면 그 명령이 끝난 뒤). KILL 은 LEASE 로 만료된다.
@@ -28,7 +29,7 @@ cmd=${1:-status}; (( $# )) && shift
 # 이 스크립트의 경로. 함수 안의 $0 은 함수 이름이라(zsh FUNCTION_ARGZERO) 여기서 받아 둔다. 전에는 usage 가 함수 안의 $0 을 써
 # 사용법 대신 「sed: …/usage: No such file or directory」 를 냈다
 self=${0:A}
-usage() { sed -n '2,23p' "$self"; exit 2 }
+usage() { sed -n '2,24p' "$self"; exit 2 }
 
 # 옵션: -w 초 · -l 설명. 나머지는 reply 에 남는다.
 wait_s=90 label=${VM_QUEUE_LABEL:-}
@@ -49,6 +50,58 @@ expand_groups() {
   local g e
   groups=()
   for g in "$@"; do e=$(vmq_expand $g) || return 1; groups+=($e); done
+}
+
+# JSON 문자열 하나: json_str <값> → REPLY. 역슬래시 · 따옴표 · 줄바꿈 · 탭 · CR 을 이스케이프하고 남은 제어 문자는 지운다
+json_str() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\t'/\\t}; s=${s//$'\r'/\\r}; s=${s//[[:cntrl:]]/}
+  REPLY="\"$s\""
+}
+# JSON 문자열 배열: json_arr <값>… → REPLY
+json_arr() { local x out=(); for x in "$@"; do json_str "$x"; out+=($REPLY); done; REPLY="[${(j:,:)out}]" }
+# 빈 값은 null: json_opt <값> → REPLY
+json_opt() { [[ -n $1 ]] && json_str "$1" || REPLY=null }
+
+# vmq status --json 의 본문(잠금 안에서 vmq_purge · vmq_scan · vmq_plan 을 마친 뒤). 대상은 $vms, 이 세션의 소유자는 $me.
+# 대상마다 한 개와 차례(요청)마다 한 개를 낸다. 차례는 $vms 의 대상에 파일이 있는 것만 낸다. 만료 판정은 lib/vmq.zsh 의 vmq_expiry 다.
+status_json() {
+  local vm k f hk busy o waiting tv targets=() requests=() fields
+  for vm in $vms; do
+    hk=$(vmq_holder $vm); busy=${Q_busy[$vm]:-}
+    vmq_tickets $vm; waiting=()
+    for f in $reply; do [[ ${f:t} == $hk ]] || waiting+=(${f:t}); done
+    fields=()
+    json_str "$vm"; fields+=("\"name\":$REPLY")
+    json_str "${VMQ_HOST[$vm]:-}"; fields+=("\"host\":$REPLY")
+    json_arr ${=VMQ_ROLES[$vm]:-}; fields+=("\"roles\":$REPLY")
+    json_opt "$hk"; fields+=("\"holder\":$REPLY")
+    # 배정됨: 기다리던 차례가 다음 확인에서 잡을 대상. 맡아 둠: VMQ_STARVE 가 지난 차례가 맡아 둔 대상(vmq_plan 의 「~」)
+    [[ -n $busy && $busy != "~"* && $busy != $hk ]] && json_str "$busy" || REPLY=null; fields+=("\"assigned\":$REPLY")
+    [[ $busy == "~"* ]] && json_str "${busy#\~}" || REPLY=null; fields+=("\"reserved\":$REPLY")
+    json_arr $waiting; fields+=("\"waiting\":$REPLY")
+    targets+=("{${(j:,:)fields}}")
+  done
+  for k in ${(ok)Q_vms}; do
+    tv=(${=Q_vms[$k]}); tv=(${tv:*vms}); (( ${#tv} )) || continue
+    f=${Q_file[$k]}; o=$(vmq_key_owner $k); vmq_expiry $f
+    fields=()
+    json_str "$k"; fields+=("\"key\":$REPLY" "\"seq\":$(( 10#${k%%-*} ))")
+    json_str "$o"; fields+=("\"owner\":$REPLY")
+    [[ $o == $me ]] && fields+=("\"isMine\":true") || fields+=("\"isMine\":false")
+    json_str "$(vmq_field $f label)"; fields+=("\"label\":$REPLY")
+    json_arr ${=Q_need[$k]}; fields+=("\"need\":$REPLY")
+    json_arr ${=Q_vms[$k]}; fields+=("\"targets\":$REPLY")
+    json_arr ${=Q_held[$k]}; fields+=("\"held\":$REPLY")
+    [[ -z ${Q_held[$k]} ]] && json_arr ${=Q_alloc[$k]:-} || json_arr; fields+=("\"assigned\":$REPLY")
+    fields+=("\"created\":$(( $(vmq_field $f created) + 0 ))" "\"active\":$(( $(vmq_field $f active) + 0 ))")
+    json_arr ${=$(vmq_field $f procs)}; fields+=("\"procs\":$REPLY")
+    json_arr ${=Q_exp[3]}; fields+=("\"alive\":$REPLY")
+    fields+=("\"expiry\":{\"basis\":\"${Q_exp[1]}\",\"seconds\":${Q_exp[2]},\"since\":${Q_exp[4]}}")
+    requests+=("{${(j:,:)fields}}")
+  done
+  json_opt "${me:#-}"
+  print -r -- "{\"version\":1,\"now\":$EPOCHSECONDS,\"lease\":$VMQ_LEASE,\"holdMax\":$VMQ_HOLD_MAX,\"starve\":$VMQ_STARVE,\"owner\":$REPLY,\"targets\":[${(j:,:)targets}],\"requests\":[${(j:,:)requests}]}"
 }
 
 # 잡은 VM 으로 묶음들을 채울 수 있는가: covers <잡은 VM 목록> <묶음>…. 후보의 VM(+ 로 이은 것)이 모두 잡은 것에 있어야 한다.
@@ -214,10 +267,12 @@ release)
   (( ${#gone} )) && print "놓음: ${(j:, :)gone}" || print "놓을 차례가 없다(소유자 $owner)"
   ;;
 status)
+  as_json=0; [[ ${1:-} == --json ]] && { as_json=1; shift }
   vms=("$@"); (( ${#vms} )) || vms=(${(ok)VMQ_HOST})
   me=$(vmq_owner 2>/dev/null || print -)
   vmq_lock || exit 1
   { vmq_purge; vmq_scan; vmq_plan } always { vmq_unlock }
+  (( as_json )) && { status_json; exit 0 }
   for vm in $vms; do
     host=${VMQ_HOST[$vm]:-?}
     vmq_tickets $vm
@@ -230,11 +285,11 @@ status)
     else
       f="$VMQ_DIR/$vm/$hk"; o=$(vmq_key_owner $hk); l=$(vmq_field $f label); c=$(vmq_field $f created)
       mark=""; [[ $o == $me ]] && mark=" ← 이 세션"
-      a=$(vmq_field $f active)
-      if alive=$(vmq_procs_alive "$(vmq_field $f procs)") && (( EPOCHSECONDS - ${a:-0} <= VMQ_HOLD_MAX )); then
-        lease_line="프로세스 $alive 가 살아 있어 만료되지 않음(마지막 제어 명령 · 갱신 $(( EPOCHSECONDS - a ))초 전, 상한 ${VMQ_HOLD_MAX}초)"
+      vmq_expiry $f
+      if [[ ${Q_exp[1]} == holdMax ]]; then
+        lease_line="프로세스 ${Q_exp[3]} 가 살아 있어 만료되지 않음(마지막 제어 명령 · 갱신 ${Q_exp[4]}초 전, 상한 ${VMQ_HOLD_MAX}초)"
       else
-        lease_line="마지막 활동 $(vmq_idle $f)초 전, 만료까지 $(( VMQ_LEASE - $(vmq_idle $f) ))초"
+        lease_line="마지막 활동 ${Q_exp[4]}초 전, 만료까지 ${Q_exp[2]}초"
       fi
       print "$vm ($host): 잡음 $o${l:+ ($l)}, 함께 잡은 VM ${Q_held[$hk]}, 등록 $(( EPOCHSECONDS - c ))초 전, $lease_line$mark"
     fi

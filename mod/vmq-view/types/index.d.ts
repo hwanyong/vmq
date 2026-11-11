@@ -1,8 +1,8 @@
 // 판정 한 가지. violation: reservations.tsv 의 줄에 어긋남. dead: 대상을 쥐었는데 살아 있는 프로세스가 없음.
-// expiring: 대상을 쥔 차례가 만료(lease · holdMax)까지 300초 이하로 남음(dead 가 아닐 때).
+// expiring: 대상을 쥔 차례가 lease 만료까지 300초 이하로 남음(dead 가 아닐 때).
 // unknown: 소유자에 세션 id 가 없어 프로젝트를 알 수 없음(README 「예약」 절).
 // key 는 같은 판정을 가르는 값이라 시간에 따라 바뀌는 값을 넣지 않는다(violation 은 예약 줄의 종류 · 대상 · 프로젝트 경로,
-// dead 는 `dead`, expiring 은 `expiring:<basis>`). text 는 표시용이다. dead · expiring 의 text 는 시간을 담아 바뀐다.
+// dead 는 `dead`, expiring 은 `expiring`). text 는 표시용이다. dead · expiring 의 text 는 시간을 담아 바뀐다.
 export type Verdict = { kind: 'violation' | 'dead' | 'expiring' | 'unknown'; key: string; text: string }
 
 // vmq status --json 의 requests[] 한 건에 세션 이름 · 프로젝트 · 판정을 붙인 것.

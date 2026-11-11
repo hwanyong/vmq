@@ -95,9 +95,11 @@ const maxVerdicts = (rule: Rule, owned: readonly Owned[]): Map<string, Verdict> 
 const isDead = ({ request, isBusy }: Owned) =>
   isBusy != true && request.held.length > 0 && request.alive.length == 0 && request.expiry.basis == 'lease' && request.expiry.since > DEAD_AFTER
 
-// 대상을 쥔 차례의 만료(lease · holdMax)가 EXPIRING_WITHIN 초 안이다. dead 로 판정한 차례는 그 처리(force-release)가 먼저라 넣지 않는다.
+// 대상을 쥔 차례가 lease 만료까지 EXPIRING_WITHIN 초 안이다. holdMax 기준은 보지 않는다. 그동안 vmq_purge 가 차례 파일을 touch 해
+// (lib/vmq.zsh), 상한이 지나면 기준이 lease 로 바뀌고 그때부터 VMQ_LEASE 초 뒤에 지워진다. 차례를 지우는 것은 lease 판정뿐이다(0.1.8).
+// dead 로 판정한 차례는 그 처리(force-release)가 먼저라 넣지 않는다.
 const isExpiring = (owned: Owned) =>
-  owned.request.held.length > 0 && owned.request.expiry.seconds <= EXPIRING_WITHIN && !isDead(owned)
+  owned.request.held.length > 0 && owned.request.expiry.basis == 'lease' && owned.request.expiry.seconds <= EXPIRING_WITHIN && !isDead(owned)
 
 const stateOf = (request: VmqRequest): Row['state'] => {
   if (request.held.length > 0) return 'held'
@@ -151,7 +153,7 @@ export const buildSnapshot = (statusText: string, agentsText: string, rulesText:
       if (verdict) verdicts.push(verdict)
     }
     if (isDead(one)) verdicts.push({ kind: 'dead', key: 'dead', text: `프로세스 없음 ${Math.floor(one.request.expiry.since / 60)}분` })
-    if (isExpiring(one)) verdicts.push({ kind: 'expiring', key: `expiring:${one.request.expiry.basis}`, text: `만료 임박 ${Math.max(0, one.request.expiry.seconds)}초(${one.request.expiry.basis == 'holdMax' ? '상한' : 'lease'})` })
+    if (isExpiring(one)) verdicts.push({ kind: 'expiring', key: 'expiring', text: `만료 임박 ${Math.max(0, one.request.expiry.seconds)}초` })
     return rowOf(one, verdicts)
   }).sort((a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || a.seq - b.seq)
   const ended = rules.filter(rule => rule.end <= status.now).map(rule => rule.text)

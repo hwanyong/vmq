@@ -143,7 +143,7 @@
 | `only` 위반 | 그 줄의 대상을 잡거나 기다리는 차례의 세션 cwd 가 프로젝트 경로 밖이다 |
 | `max` 위반 | 프로젝트 경로 아래 세션이 그 줄의 대상을 쥔 차례를 일련번호 순으로 셌을 때 상한을 넘는 뒤쪽 차례다 |
 | 프로세스 없음 | 대상을 잡았고 `alive[]` 가 비었고 `expiry.basis` 가 `lease` 이고 `expiry.since` 가 120초를 넘었고, 주인 세션의 `claude agents --json --all` `status` 가 `busy` 가 아니다(`idle` · `waiting` · `null`). 짧은 명령마다 차례를 갱신하는 세션은 명령 사이에 살아 있는 프로세스가 0개라 이 조건 없이는 오탐이 났다(seq 2704, 2026-11-11 사용자 결정 「응, 그 조건 더해」). 주인 세션을 찾지 못하면(소유자에 세션 id 가 없거나 agents 에 없음) 프로세스 조건만으로 본다 |
-| 만료 임박 | 대상을 잡았고 `expiry.seconds` 가 300초 이하이며 프로세스 없음이 아니다. `basis` 가 `lease` 면 마지막 활동에서, `holdMax` 면 마지막 제어 명령 · 갱신에서 잰 만료다. 300초는 알림이 `vmq-main` · 관리 세션 · 카드 세션을 거쳐 전달되는 시간을 두려고 정한 값이다(재지 않은 정책값, `model.ts` 의 `EXPIRING_WITHIN`) |
+| 만료 임박 | 대상을 잡았고 `expiry.basis` 가 `lease` 이고 `expiry.seconds` 가 300초 이하이며 프로세스 없음이 아니다. `holdMax` 기준은 보지 않는다. 그동안 `vmq_purge` 가 차례 파일을 touch 해 상한이 지나면 기준이 `lease` 로 바뀌고 그때부터 `VMQ_LEASE` 초 뒤에 지워지므로, 차례를 지우는 것은 `lease` 판정뿐이다. 300초는 알림이 `vmq-main` · 관리 세션 · 카드 세션을 거쳐 전달되는 시간을 두려고 정한 값이다(재지 않은 정책값, `model.ts` 의 `EXPIRING_WITHIN`) |
 | 판정 못 함 | 소유자에서 세션 id 를 뽑지 못했거나 `claude agents` 에 그 세션이 없다. 알리지 않는다 |
 
 세션 이름과 cwd 는 소유자에서 뽑은 세션 id 를 `claude agents --json --all` 의 `sessionId` 와 대조해 얻는다. 프로젝트 이름은 cwd 에서 `/.claude/worktrees/<이름>` 을 뗀 마지막 디렉터리 이름이다. 소유자가 `smbbuild-` 로 시작하면 세션 이름 뒤에 `빌드` 를 붙인다.

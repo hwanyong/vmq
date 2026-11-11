@@ -52,7 +52,7 @@
 |---|---|
 | `violation` | 그 차례를 낸 세션의 관리 세션에 SendMessage 로 알린다. 같은 위반을 이미 알렸으면 다시 보내지 않는다 |
 | `dead` | `vmq status` 가 적은 쥔 프로세스(PID · 시작 시각)를 `LC_ALL=C TZ=UTC ps -o lstart= -p <pid>` 의 출력과 대조한다. 프로세스가 없거나 시작 시각이 다를 때만 `vmq force-release <대상>` 을 실행하고, 실행 전과 뒤의 `vmq status` 줄을 그 관리 세션에 알린다 |
-| `expiring` | 대상을 쥔 차례가 만료까지 300초 이하로 남았다. `vmq status --json` 의 `expiry`(`basis` · `seconds`)를 확인하고, 그 차례를 낸 세션의 관리 세션에 대상 · 남은 초 · 기준(`lease` 면 마지막 활동, `holdMax` 면 마지막 제어 명령 · 갱신)을 알린다. 차례를 연장하거나 놓게 하지 않는다 |
+| `expiring` | 대상을 쥔 차례가 lease 만료(마지막 활동에서 `VMQ_LEASE` 초)까지 300초 이하로 남았다. `vmq status --json` 의 `expiry` 를 확인하고, 그 차례를 낸 세션의 관리 세션에 대상 · 남은 초를 알린다. 제어 명령이나 `vmq_keepalive` 로 활동을 갱신하지 않으면 지워진다고 덧붙인다. 차례를 연장하거나 놓게 하지 않는다 |
 | 끝난 예약 줄 | `reservations.tsv` 에서 그 줄을 지운다 |
 
 ## 권한

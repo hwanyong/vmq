@@ -30,6 +30,11 @@ const pathsOf = (home: string) => ({
 
 const firstLine = (text: string) => text.trim().split('\n')[0] ?? ''
 
+// status line · pane · toast 는 줄마다 한 줄로 그린다. 다른 세션이 정하는 자유 문자열(차례의 label · 세션 이름 · 프로젝트 ·
+// reservations.tsv 의 줄 · stderr)에 든 줄바꿈 · 제어 문자(C0 · DEL · C1 · U+2028 · U+2029)를 공백으로 바꾼다.
+// 2026-11-11 사용자 결정으로 toast 에 이어 pane 에도 쓴다.
+const oneLine = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+
 const parseRaw = (text: string): Raw | undefined => {
   try {
     const raw = JSON.parse(text) as Partial<Raw>
@@ -64,12 +69,12 @@ const readRaw = async ($: EngineInterface, home: string): Promise<Raw> => {
 }
 
 const statusLine = (snap: Snapshot) => {
-  if (snap.error != '') return `vmq 읽기 실패: ${snap.error}`
+  if (snap.error != '') return oneLine(`vmq 읽기 실패: ${snap.error}`)
   const count = countOf(snap)
   const parts = [`vmq 잡음 ${count.held}건`, `대기 ${count.waiting}건`, `예약 위반 ${count.violations}건`]
   if (count.dead > 0) parts.push(`프로세스 없음 ${count.dead}건`)
   if (snap.ended.length > 0) parts.push(`끝난 예약 ${snap.ended.length}줄`)
-  return parts.join(' · ')
+  return oneLine(parts.join(' · '))
 }
 
 // 모델에 넘기는 글에는 이 mod 가 만든 값(판정 종류 · 일련번호 · 줄 수)만 넣는다. 차례의 label · 세션 이름 ·
@@ -89,9 +94,6 @@ const controlPrompt = (fresh: readonly Flag[]) => {
     '끝난 예약 줄은 ~/Library/Application Support/vmq/reservations.tsv 에서 지운다.',
   ].join('\n')
 }
-
-// toast 는 한 줄로 보인다. label 등에 든 줄바꿈 · 제어 문자(C0 · DEL · C1 · U+2028 · U+2029)를 공백으로 바꾼다.
-const oneLine = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
 
 // 명령이 실패하거나(종료 코드 · 시작 실패 · 시간 초과) 출력이 JSON 이 아니면 error 로 돌려준다.
 const load = async ($: EngineInterface, home: string, rulesText: string, at: number): Promise<{ raw: Raw; next: Snapshot } | { error: string }> => {
@@ -164,10 +166,10 @@ const drawView = async ($: EngineInterface, e: Resolvable, columns: number) => {
   return (
     <Box flexDirection="column" width={columns}>
       <Text bold wrap="truncate-end">{headerText(snap)}</Text>
-      {snap.ended.map(text => <Text color="yellow" wrap="truncate-end">끝난 예약 줄: {text}</Text>)}
+      {snap.ended.map(text => <Text color="yellow" wrap="truncate-end">{oneLine(`끝난 예약 줄: ${text}`)}</Text>)}
       {snap.badLines > 0 && <Text color="yellow" wrap="truncate-end">reservations.tsv 에서 읽지 못한 줄 {snap.badLines}줄</Text>}
       {snap.at != 0 && snap.rows.length == 0 && <Text dimColor>큐에 요청이 없다.</Text>}
-      {snap.rows.map(row => <Text color={colorOf(row)} dimColor={row.state == 'waiting' && colorOf(row) == undefined} wrap="truncate-end">{rowText(row)}</Text>)}
+      {snap.rows.map(row => <Text color={colorOf(row)} dimColor={row.state == 'waiting' && colorOf(row) == undefined} wrap="truncate-end">{oneLine(rowText(row))}</Text>)}
     </Box>
   )
 }

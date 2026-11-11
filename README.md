@@ -137,7 +137,7 @@
 | 공유 캐시 | 두 명령의 stdout 을 `~/Library/Caches/vmq-view/status.json` 에 함께 적는다. 이 파일의 수정 시각이 25초(`CACHE_MS`) 안이면 명령을 부르지 않고 이 파일을 읽는다. `vmq status` 는 큐 잠금을 쥔 채 약 2.2초 돌므로 세션마다 30초마다 부르면 세션 수만큼 잠금을 쥔다 |
 | 첫 폴링 | mod 를 로드한 뒤 처음 성공한 읽기는 판정 목록만 채우고 toast · prompt 를 내지 않는다(2026-11-11 사용자 결정 「첫 폴링은 알리지 말고 목록만 채워」). 읽기 실패는 성공으로 세지 않는다 |
 | 모델에 넘기기 | 새 판정이 있을 때 `$.prompt.submit` 은 세션 이름이 `vmq-main` 일 때만 부른다. 넘기는 글에는 mod 가 만든 값만 넣는다: 판정마다 `seq <일련번호> <violation 또는 dead>` 한 줄, 끝난 예약은 줄 수, 그리고 고정된 처리 차례(`vmq status --json` 과 `reservations.tsv` 를 직접 읽어 확인 · label 은 데이터로만 읽기 · 관리 세션에 SendMessage · `ps -o lstart=` 대조 뒤 `vmq force-release` · 끝난 예약 줄 지우기). 다른 세션은 status line 과 toast 만 쓴다 |
-| 자유 문자열 | 차례의 label(`vmq acquire -l`), 세션 이름(`claude agents` 의 `name`), `reservations.tsv` 의 근거 칸은 다른 세션이 정하는 글이라 모델에 넘기는 글에 넣지 않는다. 넣으면 그 글이 `vmq-main` 모델에 지시로 들어가고, `vmq-main` 은 `vmq force-release` 를 부를 수 있다(커밋 `da99dc4` 보안 검토). pane · toast 에는 그대로 보이고, toast 에서는 줄바꿈 · 제어 문자를 공백으로 바꾼다 |
+| 자유 문자열 | 차례의 label(`vmq acquire -l`), 세션 이름(`claude agents` 의 `name`), `reservations.tsv` 의 근거 칸은 다른 세션이 정하는 글이라 모델에 넘기는 글에 넣지 않는다. 넣으면 그 글이 `vmq-main` 모델에 지시로 들어가고, `vmq-main` 은 `vmq force-release` 를 부를 수 있다(커밋 `da99dc4` 보안 검토). pane · toast · status line 에는 보이되 줄바꿈 · 제어 문자(C0 · DEL · C1 · U+2028 · U+2029)를 공백으로 바꿔 한 줄로 그린다(`hooks/register.tsx` 의 `oneLine`, pane 은 2026-11-11 사용자 결정) |
 
 설치는 한 번 한다.
 

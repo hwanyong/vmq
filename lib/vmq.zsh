@@ -27,8 +27,11 @@
 # 소유자: VM_QUEUE_OWNER, 없으면 Claude Code 가 세션마다 주는 CLAUDE_CODE_SESSION_ID. 한 세션 안의 하위 에이전트(Agent 도구)는 같은
 # 세션 ID 를 물려받으므로, 하위 에이전트가 따로 대상을 다루면 VM_QUEUE_OWNER 를 따로 정한다.
 # 차례는 마지막 활동에서 VM_QUEUE_LEASE 초(기본 1200) 동안 유효하다. 제어 명령의 vmq_require 와 acquire 가 시각을 새로 적는다. 그보다
-# 오래 활동이 없는 차례는 다음에 차례표를 읽는 쪽이 지운다. 끝난 사슬이 쥔 차례를 기다리는 같은 소유자의 acquire · run 은 그 차례의 시각을
-# 새로 적지 않는다(아래 vmq_sync 의 주석).
+# 오래 활동이 없는 차례는 다음에 차례표를 읽는 쪽이 지운다. 차례 하나가 대상 여럿에 걸쳐 있으면 그 파일이 모두 VM_QUEUE_LEASE 를 넘었을 때
+# 함께 지운다(vmq_purge). 끝난 사슬이 쥔 차례는 같은 소유자의 조회(vmq mine · vmq_chain_of)와 acquire · run 의 기다림이 그 차례의 시각을
+# 새로 적지 않는다(아래 vmq_chain_ended · vmq_sync 의 주석).
+# 차례 고정: VM_QUEUE_TICKET 에 차례 키(<10자리 일련번호>-<소유자>, vmq ticket)를 주면 vmq_require · vmq_keepalive · vmq_chain_of ·
+# vmq_chain_mark · vmq release · vmq mine 은 그 키가 이 소유자의 지금 차례일 때만 동작하고, 아니면 아무것도 하지 않고 1 이다(vmq_ticket_ok).
 # 차례를 쥔 프로세스가 살아 있으면 활동이 없어도 지우지 않는다. vmq_require 가 자기를 부른 셸 프로세스($$, 스크립트면 그 스크립트)를
 # procs 에 적고, 차례표를 읽는 쪽(vmq_purge)은 그 프로세스가 살아 있으면 수정 시각을 새로 적는다. 그래서 그 프로세스가 끝나면 끝난 뒤
 # 차례표를 처음 읽은 때부터 VM_QUEUE_LEASE 초 뒤 지워진다(기다리는 쪽이 2초마다 읽는다). 마지막 제어 명령 · 갱신(active)에서 VM_QUEUE_HOLD_MAX 초
@@ -48,7 +51,7 @@ VMQ_STARVE=${VM_QUEUE_STARVE:-1800}
 VMQ_HOLD_MAX=${VM_QUEUE_HOLD_MAX:-3600}
 # 차례표를 읽은 결과(vmq_scan). 키는 차례 파일 이름(<일련번호>-<소유자>).
 typeset -gA Q_vms Q_file Q_need Q_held Q_alloc Q_busy
-# 차례 파일 하나의 만료 판정(vmq_expiry)
+# 만료 판정(차례 파일 하나는 vmq_expiry, 차례 하나는 vmq_key_expiry)
 typeset -ga Q_exp
 
 # 대상 목록을 읽는다. VMQ_HOST[이름] = Mac, VMQ_ROLES[이름] = 역할(공백으로 나눔)
@@ -216,8 +219,8 @@ vmq_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1 }
 vmq_has() { [[ " $1 " == *" $2 "* ]] }
 
 # 차례 파일을 다시 쓴다: vmq_write <파일> <owner> <label> <created> <need> [held] [active] [procs] [chain]
-# chain 은 이 차례를 쥔 사슬 셸의 `<PID>@<시작 시각>` 이다(vmq_chain_mark). 그 사슬이 끝난 차례는 같은 소유자의 acquire · run 에도 넘기지 않고,
-# 그 acquire · run 이 기다리는 동안 시각도 새로 적지 않는다(bin/vmq 의 register).
+# chain 은 이 차례를 쥔 사슬 셸의 `<PID>@<시작 시각>` 이다(vmq_chain_mark). 그 사슬이 끝난 차례(vmq_chain_ended)는 같은 소유자의 acquire · run 에도
+# 넘기지 않고(bin/vmq 의 register), 같은 소유자가 읽기만 할 때는 시각도 새로 적지 않는다(vmq_sync).
 vmq_write() {
   print -l "owner=$2" "label=$3" "created=$4" "need=$5" ${6:+"held=$6"} ${7:+"active=$7"} ${8:+"procs=$8"} ${9:+"chain=$9"} > "$1"
 }
@@ -300,26 +303,37 @@ vmq_expand_joined() {
   print -r -- $out
 }
 
-# 마지막 활동에서 VMQ_LEASE 가 지난 차례를 지운다(잠금 안에서 부른다). 그 전에, 차례를 쥔 프로세스가 살아 있고 마지막 제어 명령 · 갱신에서
-# VMQ_HOLD_MAX 가 지나지 않은 차례는 수정 시각을 새로 적어 지우지 않는다.
+# 마지막 활동에서 VMQ_LEASE 가 지난 차례를 지운다(잠금 안에서 부른다). 판정은 차례(키) 단위이고 vmq_key_expiry 가 한다. 근거가 holdMax 면
+# (그 키의 파일 가운데 하나라도 쥔 프로세스가 살아 있고 마지막 제어 명령 · 갱신에서 VMQ_HOLD_MAX 가 지나지 않았다) 그 키의 파일을 모두 touch 해
+# 지우지 않는다. 근거가 lease 이고 지난 초가 VMQ_LEASE 를 넘었으면(그 키의 모든 파일이 마지막 활동에서 VMQ_LEASE 를 넘었다) 그 키의 파일을
+# 모두 지우고, log 에는 대상마다 「만료 <대상> <소유자> (마지막 활동 N초 전[, …])」 한 줄을 남긴다(bin/vmq 의 ended 가 이 형식을 읽는다).
+# N 은 그 차례의 마지막 활동(파일들 가운데 가장 최근 수정 시각)에서 지난 초라 같은 차례의 줄은 모두 같은 N 이다.
+# 전에는 파일마다 판정해, 대상 두 개 이상을 함께 잡은 차례의 파일들 수정 시각이 다르면 VMQ_LEASE 를 넘은 파일만 지우고 나머지를 남겼다.
+# 그러면 Q_held 에는 지워진 파일의 대상이 남아, vmq status 가 그 대상의 없는 파일로 vmq_expiry 를 불러 set -u 로 끝났다(Q_exp[4]: parameter
+# not set, 종료 코드 1).
 vmq_purge() {
-  local vm f why
+  local vm f k why
+  local -A kvms
   for vm in ${(ok)VMQ_HOST}; do
     vmq_tickets $vm
-    for f in $reply; do
-      vmq_expiry $f
-      [[ ${Q_exp[1]} == holdMax ]] && { touch -- "$f"; continue }
-      (( Q_exp[4] > VMQ_LEASE )) || continue
-      why=; [[ -n ${Q_exp[3]} ]] && why=", 프로세스 ${Q_exp[3]} 는 살아 있지만 마지막 제어 명령 · 갱신에서 상한 ${VMQ_HOLD_MAX}초가 지났다"
-      rm -f -- "$f" && vmq_log "만료 $vm $(vmq_key_owner ${f:t}) (마지막 활동 ${Q_exp[4]}초 전$why)"
-    done
+    for f in $reply; do kvms[${f:t}]+="${kvms[${f:t}]:+ }$vm"; done
+  done
+  for k in ${(ok)kvms}; do
+    vmq_key_expiry $k ${=kvms[$k]}
+    if [[ ${Q_exp[1]} == holdMax ]]; then
+      for vm in ${=kvms[$k]}; do touch -- "$VMQ_DIR/$vm/$k"; done
+      continue
+    fi
+    (( Q_exp[4] > VMQ_LEASE )) || continue
+    why=; [[ -n ${Q_exp[3]} ]] && why=", 프로세스 ${Q_exp[3]} 는 살아 있지만 마지막 제어 명령 · 갱신에서 상한 ${VMQ_HOLD_MAX}초가 지났다"
+    for vm in ${=kvms[$k]}; do rm -f -- "$VMQ_DIR/$vm/$k" && vmq_log "만료 $vm $(vmq_key_owner $k) (마지막 활동 ${Q_exp[4]}초 전$why)"; done
   done
 }
 
 # 차례 파일 하나가 언제 무엇으로 만료되는지: vmq_expiry <파일> → Q_exp=(<근거> <만료까지 초> <살아 있는 프로세스> <근거의 시작에서 지난 초>).
 # 근거는 holdMax(쥔 프로세스가 살아 있고 마지막 제어 명령 · 갱신에서 VMQ_HOLD_MAX 가 지나지 않았다. 지난 초는 active 에서 잰다) 또는
 # lease(그 밖. 지난 초는 마지막 활동(수정 시각)에서 잰다). 살아 있는 프로세스는 근거가 lease 여도 적는다(상한이 지난 경우).
-# vmq_purge 와 vmq status(문장 · --json)가 이 한 곳의 판정을 쓴다.
+# 차례 단위 판정(vmq_key_expiry)이 파일마다 부른다.
 vmq_expiry() {
   local f=$1 active alive idle
   active=$(vmq_field $f active)
@@ -330,6 +344,25 @@ vmq_expiry() {
   fi
   idle=$(vmq_idle $f)
   Q_exp=(lease $(( VMQ_LEASE - idle )) "$alive" $idle)
+}
+
+# 차례 하나가 언제 무엇으로 만료되는지: vmq_key_expiry <키> <대상>… → Q_exp(형식은 vmq_expiry 와 같다). 대상은 그 키의 차례 파일이 있는
+# 대상이다(vmq_scan 뒤면 Q_vms[키]). 파일 하나라도 근거가 holdMax 면 그 파일의 판정이고, 아니면 마지막 활동(수정 시각)이 가장 최근인 파일의
+# 판정이다. 그 차례는 파일이 모두 VMQ_LEASE 를 넘어야 지워지므로(vmq_purge) 만료까지 남은 초는 가장 최근 파일이 정한다. 대상이 없으면 1.
+# vmq_purge 와 vmq status(문장 · --json)가 이 한 곳의 판정을 쓴다. 전에는 vmq status 가 파일 하나(문장은 줄마다 그 대상의 파일, --json 은
+# Q_file)로 vmq_expiry 를 불러, 파일들의 수정 시각이 다르면 아직 지우지 않을 차례를 「만료까지 -20초」 로 찍고 같은 차례의 두 대상 줄이 서로
+# 다른 만료를 찍었다.
+vmq_key_expiry() {
+  local k=$1 vm
+  local -a best
+  shift
+  for vm in "$@"; do
+    vmq_expiry "$VMQ_DIR/$vm/$k"
+    [[ ${Q_exp[1]} == holdMax ]] && return 0
+    if (( ! ${#best} )) || (( Q_exp[4] < best[4] )); then best=("${Q_exp[@]}"); fi
+  done
+  (( ${#best} )) || return 1
+  Q_exp=("${best[@]}")
 }
 
 # 차례표를 읽는다(잠금 안에서). 이 형식 전의 차례(need 줄이 없다)는 파일이 있는 VM 을 하나씩 받는 요청이고, 그 VM 들 모두에서 맨 앞이면
@@ -439,19 +472,45 @@ vmq_touch() {
   for vm in ${=Q_vms[$k]}; do touch -- "$VMQ_DIR/$vm/$k"; done
 }
 
-# 차례표를 정리하고 그 소유자의 차례를 갱신한다(잠금 안에서): vmq_settle 뒤 vmq_touch. 만료 정리 → 읽기 → 배정 → 배정되었으면 잡기 →
-# 내 차례 파일의 시각을 새로 적기. REPLY 에 그 소유자의 키(없으면 빈 값)를 남긴다.
-# 시각을 새로 적을지를 차례의 내용을 읽은 뒤 정해야 하는 쪽은 두 함수를 따로 부른다. bin/vmq 의 register 가 그렇다: 끝난 사슬이 쥔 차례는
-# vmq_settle 만 부르고 시각을 새로 적지 않는다. 전에는 register 도 이 함수를 불러, 끝난 사슬의 차례를 기다리는 같은 소유자의 acquire · run 이
-# 2초마다 그 차례의 시각을 새로 적었다. 그 차례에 적힌 프로세스 네 개가 모두 끝난 뒤에도 차례가 만료되지 않아, 뒤에서 기다리던 다른 소유자가
-# 받지 못했다(2026-11-11 08:55Z, 일련번호 2775).
+# 끝난 사슬이 쥔 차례인가(vmq_scan 뒤): vmq_chain_ended <키>. 키가 있고, 그 차례가 잡혔고(held), chain 줄(vmq_chain_mark)이 있고, 그 사슬
+# 프로세스가 살아 있지 않으면(vmq_procs_alive) 0, 아니면 1. 그 차례는 사슬의 뒷정리가 아직 VM 을 끄고 되돌리는 중일 수 있어, 같은 소유자의
+# acquire · run 에도 넘기지 않고(bin/vmq 의 register 가 4) 같은 소유자의 조회로는 시각을 새로 적지 않는다(vmq_sync).
+vmq_chain_ended() {
+  local k=${1:-} chain
+  [[ -n $k && -n ${Q_held[$k]:-} ]] || return 1
+  chain=$(vmq_field ${Q_file[$k]} chain)
+  [[ -n $chain ]] || return 1
+  ! vmq_procs_alive $chain >/dev/null
+}
+
+# 고정한 차례의 대조(잠금 안에서, vmq_settle 뒤): vmq_ticket_ok <소유자> <지금 키>. VM_QUEUE_TICKET 이 비었거나 없으면, 또는 지금 키와 같으면 0.
+# 다르거나 지금 차례가 없으면 stderr 에 고정한 키 · 지금 키를 쓰고 1. 부른 쪽은 1 이면 그 차례에 아무것도 하지 않는다.
+# VM_QUEUE_TICKET 은 차례 키(<10자리 일련번호>-<소유자>, vmq ticket 이 찍는 값)다. 소유자 단위로 판정하는 vmq_require · vmq release 는 차례가 만료 ·
+# 강제로 놓음으로 지워진 뒤 같은 소유자가 새 차례를 받으면 그 새 차례에 적용되었다. 앞 차례의 뒷정리가 그 키를 VM_QUEUE_TICKET 에 주면 새 차례에는 적용되지 않는다.
+# 이 값을 보는 것은 vmq_require · vmq_keepalive · vmq_chain_of · vmq_chain_mark · vmq release · vmq mine 이다. bin/vmq 의 다른 명령은 이 값을 지운다.
+vmq_ticket_ok() {
+  [[ -z ${VM_QUEUE_TICKET:-} || $VM_QUEUE_TICKET == ${2:-} ]] && return 0
+  print -u2 -r -- "제어 대상 큐: VM_QUEUE_TICKET 의 차례가 이 소유자의 지금 차례가 아니어서 거절한다(아무것도 하지 않았다). 소유자 $1, 고정한 키 $VM_QUEUE_TICKET, 지금 키 ${2:-없음}"
+  return 1
+}
+
+# 차례표를 정리하고 그 소유자의 차례를 갱신한다(잠금 안에서): vmq_sync <소유자>. vmq_settle(만료 정리 → 읽기 → 배정 → 배정되었으면 잡기) 뒤
+# vmq_ticket_ok 로 고정한 차례를 대조하고, 같으면 vmq_touch 로 내 차례 파일의 시각을 새로 적는다. REPLY 에 그 소유자의 키(없으면 빈 값)를 남긴다.
+# 대조가 거절이면 시각을 적지 않고 1, 그 밖에는 0.
+# 끝난 사슬이 쥔 차례(vmq_chain_ended)는 시각을 새로 적지 않는다. 시각을 적는 것은 그 차례로 실제로 무엇을 한 쪽뿐이다: vmq_require 의 vmq_attach,
+# vmq_chain_mark, 성공한 vmq_keepalive 가 차례 파일을 다시 쓴다. 그래서 같은 소유자가 vmq mine · vmq_chain_of · acquire · run 으로 되풀이해 읽어도
+# 그 차례는 마지막 활동에서 VMQ_LEASE 초 뒤 만료된다.
+# 전에는 이 함수가 늘 시각을 적었다. 끝난 사슬의 차례를 기다리는 같은 소유자의 acquire · run 이 2초마다 그 차례의 시각을 새로 적어, 그 차례에 적힌
+# 프로세스 네 개가 모두 끝난 뒤에도 차례가 만료되지 않았고 뒤에서 기다리던 다른 소유자가 받지 못했다(2026-11-11 08:55Z, 일련번호 2775).
+# 그 고침(564311c)은 register 만 고쳐, vmq mine · vmq_chain_of 등은 계속 그 차례의 시각을 적었다.
 vmq_sync() {
   vmq_settle $1
-  vmq_touch "$REPLY"
+  vmq_ticket_ok $1 "$REPLY" || return 1
+  vmq_chain_ended "$REPLY" || vmq_touch "$REPLY"
   return 0
 }
 
-# 소유자가 그 VM 들을 모두 잡았는가(vmq_sync 뒤)
+# 소유자가 그 VM 들을 모두 잡았는가(vmq_settle · vmq_sync 뒤)
 vmq_holds() {
   local owner=$1 k vm; shift
   k=$(vmq_key $owner)
@@ -468,6 +527,8 @@ vmq_holder_line() {
   for x in ${(k)Q_vms}; do [[ -z ${Q_held[$x]} ]] && vmq_has "${Q_vms[$x]}" $1 && (( n++ )); done
   [[ -n $k ]] || { print "없음, 대기 $n"; return }
   local f="$VMQ_DIR/$1/$k" l
+  # held 에 적힌 대상의 파일이 없으면(대상마다 만료를 판정하던 전의 vmq_purge 가 남긴 차례) 그 차례의 남은 파일로 읽는다
+  [[ -f $f ]] || f=${Q_file[$k]}
   l=$(vmq_field $f label)
   print "$(vmq_key_owner $k)${l:+ ($l)}, 마지막 활동 $(vmq_idle $f)초 전, 대기 $n"
 }
@@ -486,7 +547,8 @@ vmq_attach() {
   done
 }
 
-# 잡은 차례에 그 차례를 쥔 사슬을 적는다: vmq_chain_mark <사슬 셸의 PID> <대상>… 차례를 가졌으면 0, 아니면 1.
+# 잡은 차례에 그 차례를 쥔 사슬을 적는다: vmq_chain_mark <사슬 셸의 PID> <대상>… 차례를 가졌으면 0, 아니면 1(VM_QUEUE_TICKET 이 지금 차례와
+# 다를 때도 1, vmq_ticket_ok).
 # 사슬(한 번 받아 VM 을 다루고 끝나는 셸, poieve 의 vm_chain_guard 가 부른다)이 끝난 뒤 그 뒷정리가 차례를 놓기 전에 같은 소유자의 다음 사슬이
 # acquire 하면, 전에는 register 가 「이미 있음」 으로 그 차례를 넘겨 앞 사슬의 뒷정리가 다음 사슬의 VM 을 끄고 되돌렸다
 # (2026-10-22 23:57 PDT, poieve tracker bug_1792779968019_9ycb6f). 사슬이 살아 있을 때 적어 두므로 사슬 셸이 끝나는 순간부터 막힌다.
@@ -498,8 +560,7 @@ vmq_chain_mark() {
   owner=$(vmq_owner) || return 1
   vmq_lock || return 1
   {
-    vmq_sync $owner
-    if vmq_holds $owner "$@"; then
+    if vmq_sync $owner && vmq_holds $owner "$@"; then
       ok=1
       for vm in ${=Q_vms[$REPLY]}; do
         f="$VMQ_DIR/$vm/$REPLY"
@@ -510,20 +571,25 @@ vmq_chain_mark() {
   } always { vmq_unlock }
   (( ok ))
 }
-# 내가 잡은 차례에 적힌 사슬: vmq_chain_of <대상>… → 적힌 `<PID>@<시작 시각>` 을 찍는다(없으면 빈 줄). 차례가 없으면 1.
+# 내가 잡은 차례에 적힌 사슬: vmq_chain_of <대상>… → 적힌 `<PID>@<시작 시각>` 을 찍는다(없으면 빈 줄). 차례가 없으면 1(VM_QUEUE_TICKET 이 지금
+# 차례와 다를 때도 1, vmq_ticket_ok). 조회라 끝난 사슬이 쥔 차례의 시각은 새로 적지 않는다(vmq_sync).
 vmq_chain_of() {
   local owner ok=0 out=
   owner=$(vmq_owner) || return 1
   vmq_lock || return 1
   {
-    vmq_sync $owner
-    vmq_holds $owner "$@" && { ok=1; out=$(vmq_field ${Q_file[$REPLY]} chain) }
+    vmq_sync $owner && vmq_holds $owner "$@" && { ok=1; out=$(vmq_field ${Q_file[$REPLY]} chain) }
   } always { vmq_unlock }
   (( ok )) && print -r -- $out
 }
 
 # 차례를 쥔 프로세스가 제어 명령 없이 오래 기다리는 동안 부른다: vmq_keepalive. 이 소유자가 잡은 차례의 procs 에 이 셸($$)이 살아 있는
 # 것으로 적혀 있을 때만 active(마지막 활동 확인)를 지금 시각으로 다시 적고 0, 아니면 1(아무것도 바꾸지 않는다). procs · chain 은 그대로 둔다.
+# VM_QUEUE_TICKET 이 지금 차례와 다를 때도 1 이다(vmq_ticket_ok). 이 함수가 차례 파일을 다시 쓰는 것(수정 시각도 바뀐다)은 성공할 때의
+# vmq_write 하나다. 그 앞의 vmq_settle 은 거절할 때도 돌고, 그 안의 두 함수가 차례 파일을 바꾼다: vmq_purge 는 vmq_key_expiry 가 holdMax 로
+# 판정한 차례의 모든 파일 시각을 새로 적고, vmq_commit 은 배정된 대기 차례를 잡는다(held 줄 · 로그 「잡음」). 그래서 거절이면 이 함수가 바꾼 것은
+# 없지만, 그 차례가 그 두 경우에 해당하면 그 차례 파일의 내용이나 수정 시각이 바뀐다. 전에는 vmq_sync 를 불러, 거절할 때도 그 소유자 차례의
+# 수정 시각을 새로 적었다.
 # 소유자가 다르거나(다른 세션) 같은 소유자라도 vmq_require 로 차례에 적히지 않은 프로세스는 남의 차례를 늘리지 못한다.
 # 부르는 간격은 VMQ_KEEPALIVE 초(VM_QUEUE_HOLD_MAX 의 1/6, 기본 600)다. 상한의 1/6 이라, 갱신이 다섯 번 잇달아 실패해야(차례표 잠금을
 # 얻지 못함 등) 상한에 걸린다.
@@ -539,8 +605,8 @@ vmq_keepalive() {
   owner=$(vmq_owner) || return 1
   vmq_lock || return 1
   {
-    vmq_sync $owner
-    if [[ -n $REPLY && -n ${Q_held[$REPLY]:-} ]] && vmq_has "$(vmq_procs_alive "$(vmq_field ${Q_file[$REPLY]} procs)")" $me; then
+    vmq_settle $owner
+    if vmq_ticket_ok $owner "$REPLY" && [[ -n $REPLY && -n ${Q_held[$REPLY]:-} ]] && vmq_has "$(vmq_procs_alive "$(vmq_field ${Q_file[$REPLY]} procs)")" $me; then
       ok=1
       for vm in ${=Q_vms[$REPLY]}; do
         f="$VMQ_DIR/$vm/$REPLY"
@@ -553,6 +619,8 @@ vmq_keepalive() {
 
 # 프로젝트 도구가 제어 명령 앞에서 부른다: vmq_require <대상>… 차례를 가졌으면 시각과 이 셸 프로세스($$)를 적고 0, 아니면 이유를
 # stderr 에 쓰고 1. 적은 프로세스가 살아 있는 동안 차례는 만료되지 않는다(위 「만료」, 상한 VM_QUEUE_HOLD_MAX).
+# VM_QUEUE_TICKET 이 지금 차례와 다르면 그 차례에 아무것도 적지 않고 1 이다(vmq_ticket_ok). 같으면 끝난 사슬이 쥔 차례에도 vmq_attach 로 적는다.
+# 그 차례로 VM 을 끄고 되돌리는 뒷정리의 제어 명령이 이것을 지나야 하기 때문이다.
 # 차례보다 먼저 부른 도구의 판을 본다(위 vmq_tool_current).
 vmq_require() {
   [[ ${VM_QUEUE_INTERNAL:-} == 1 ]] && return 0
@@ -561,8 +629,9 @@ vmq_require() {
   owner=$(vmq_owner) || return 1
   vmq_lock || return 1
   {
-    vmq_sync $owner
-    if vmq_holds $owner "$@"; then
+    if ! vmq_sync $owner; then
+      : # VM_QUEUE_TICKET 거절. 이유는 vmq_ticket_ok 가 stderr 에 썼다
+    elif vmq_holds $owner "$@"; then
       ok=1
       vmq_attach $REPLY $$
     else

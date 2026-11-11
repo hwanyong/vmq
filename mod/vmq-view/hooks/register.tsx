@@ -73,6 +73,7 @@ const statusLine = (snap: Snapshot) => {
   const count = countOf(snap)
   const parts = [`vmq 잡음 ${count.held}건`, `대기 ${count.waiting}건`, `예약 위반 ${count.violations}건`]
   if (count.dead > 0) parts.push(`프로세스 없음 ${count.dead}건`)
+  if (count.expiring > 0) parts.push(`만료 임박 ${count.expiring}건`)
   if (snap.ended.length > 0) parts.push(`끝난 예약 ${snap.ended.length}줄`)
   return oneLine(parts.join(' · '))
 }
@@ -149,6 +150,7 @@ const rowText = (row: Row) => {
 const colorOf = (row: Row) => {
   if (row.verdicts.some(one => one.kind == 'violation')) return 'red'
   if (row.verdicts.some(one => one.kind == 'dead')) return 'yellow'
+  if (row.verdicts.some(one => one.kind == 'expiring')) return 'cyan'
   return undefined
 }
 

@@ -27,6 +27,9 @@ const WORKTREE_PART = /\/\.claude\/worktrees\/.*$/
 // 대상을 쥐었는데 살아 있는 프로세스가 없고 마지막 활동이 이만큼(초) 지났으면 프로세스 없음으로 본다.
 // 짧은 명령이 번갈아 쥐는 차례는 활동이 몇 초 간격으로 갱신되므로 걸리지 않는다.
 const DEAD_AFTER = 120
+// 쥔 차례가 만료까지 이만큼(초) 남았으면 알린다. 알림이 vmq-main · 관리 세션 · 카드 세션을 거쳐 전달되는 시간을 두려고 정한 값이다
+// (2026-11-11, 재지 않은 정책값). 30초 폴링이 열 번 돈다. 쉬는 세션이 메시지를 늦게 꺼내는 때가 있어(VMQ-MAIN.md 「알려진 한계」) 짧게 잡지 않았다.
+const EXPIRING_WITHIN = 300
 const FIELDS = 7
 
 const basename = (path: string) => path.split('/').filter(part => part != '').pop() ?? path
@@ -92,6 +95,10 @@ const maxVerdicts = (rule: Rule, owned: readonly Owned[]): Map<string, Verdict> 
 const isDead = ({ request, isBusy }: Owned) =>
   isBusy != true && request.held.length > 0 && request.alive.length == 0 && request.expiry.basis == 'lease' && request.expiry.since > DEAD_AFTER
 
+// 대상을 쥔 차례의 만료(lease · holdMax)가 EXPIRING_WITHIN 초 안이다. dead 로 판정한 차례는 그 처리(force-release)가 먼저라 넣지 않는다.
+const isExpiring = (owned: Owned) =>
+  owned.request.held.length > 0 && owned.request.expiry.seconds <= EXPIRING_WITHIN && !isDead(owned)
+
 const stateOf = (request: VmqRequest): Row['state'] => {
   if (request.held.length > 0) return 'held'
   if (request.assigned.length > 0) return 'assigned'
@@ -144,6 +151,7 @@ export const buildSnapshot = (statusText: string, agentsText: string, rulesText:
       if (verdict) verdicts.push(verdict)
     }
     if (isDead(one)) verdicts.push({ kind: 'dead', key: 'dead', text: `프로세스 없음 ${Math.floor(one.request.expiry.since / 60)}분` })
+    if (isExpiring(one)) verdicts.push({ kind: 'expiring', key: `expiring:${one.request.expiry.basis}`, text: `만료 임박 ${Math.max(0, one.request.expiry.seconds)}초(${one.request.expiry.basis == 'holdMax' ? '상한' : 'lease'})` })
     return rowOf(one, verdicts)
   }).sort((a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || a.seq - b.seq)
   const ended = rules.filter(rule => rule.end <= status.now).map(rule => rule.text)
@@ -156,4 +164,5 @@ export const countOf = (snapshot: Snapshot) => ({
   waiting: snapshot.rows.filter(row => row.state == 'waiting').length,
   violations: snapshot.rows.filter(row => row.verdicts.some(one => one.kind == 'violation')).length,
   dead: snapshot.rows.filter(row => row.verdicts.some(one => one.kind == 'dead')).length,
+  expiring: snapshot.rows.filter(row => row.verdicts.some(one => one.kind == 'expiring')).length,
 })

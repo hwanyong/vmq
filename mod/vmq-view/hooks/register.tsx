@@ -1,0 +1,211 @@
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register, StateWrite } from 'claude-code'
+
+import type { Row, Snapshot } from '../types'
+import { buildSnapshot, countOf, flagEntries, sessionNameOf } from './model'
+import { fillSlot, offerChoice, placementIn, readPlacement } from './pane-grid'
+
+const PLUGIN = 'vmq-view'
+const PANE = 'vmq-view'
+const TITLE = 'vmq'
+// 새 판정을 모델에 넘기는 세션의 이름(~/.claude/CLAUDE.md §18). 다른 세션은 status line 과 toast 만 쓴다.
+const CONTROL_SESSION = 'vmq-main'
+const POLL_MS = 30_000
+// vmq status 는 큐 잠금을 쥔 채 2초쯤 돈다. 여러 세션이 이 mod 를 쓰면 캐시가 이만큼(ms) 지났을 때만 다시 부른다.
+const CACHE_MS = 25_000
+const RUN_MS = 20_000
+
+const EMPTY: Snapshot = { at: 0, rows: [], ended: [], badLines: 0, flagged: [], error: '' }
+// Snapshot 의 칸이 바뀌면 shape 를 바꾼다. 이전 판이 남긴 값은 reload 뒤에도 남는다.
+const snapshot = atom({ plugin: 'vmq-view', key: 'snapshot' } as const, EMPTY, { shape: 'snapshot-1' })
+
+type Resolvable = Parameters<EngineInterface['ui']['resolve']>[0]
+type Raw = { status: string; agents: string }
+
+const pathsOf = (home: string) => ({
+  vmq: `${home}/.claude/tools/vmq/bin/vmq`,
+  cache: `${home}/Library/Caches/vmq-view/status.json`,
+  rules: `${home}/Library/Application Support/vmq/reservations.tsv`,
+})
+
+const firstLine = (text: string) => text.trim().split('\n')[0] ?? ''
+
+const parseRaw = (text: string): Raw | undefined => {
+  try {
+    const raw = JSON.parse(text) as Partial<Raw>
+    return typeof raw.status == 'string' && typeof raw.agents == 'string' ? { status: raw.status, agents: raw.agents } : undefined
+  } catch {
+    // 다른 세션이 쓰는 중인 파일을 읽었다. 명령을 다시 부른다.
+    return undefined
+  }
+}
+
+const readCache = async ($: EngineInterface, path: string): Promise<Raw | undefined> => {
+  if (!(await $.fs.exists(path))) return undefined
+  const { mtimeMs } = await $.fs.stat(path)
+  if ((await $.clock.now()) - mtimeMs > CACHE_MS) return undefined
+  return parseRaw(await $.fs.read(path))
+}
+
+const run = async ($: EngineInterface, argv: string[]): Promise<string> => {
+  const { exitCode, stdout, stderr } = await $.process.run(argv, { timeoutMs: RUN_MS })
+  if (exitCode != 0) throw new Error(`${argv.slice(-3).join(' ')} 종료 코드 ${exitCode}: ${firstLine(stderr)}`)
+  return stdout
+}
+
+const readRaw = async ($: EngineInterface, home: string): Promise<Raw> => {
+  const paths = pathsOf(home)
+  const cached = await readCache($, paths.cache)
+  if (cached) return cached
+  const status = await run($, [paths.vmq, 'status', '--json'])
+  const agents = await run($, ['claude', 'agents', '--json', '--all'])
+  await $.fs.write(paths.cache, JSON.stringify({ status, agents }))
+  return { status, agents }
+}
+
+const statusLine = (snap: Snapshot) => {
+  if (snap.error != '') return `vmq 읽기 실패: ${snap.error}`
+  const count = countOf(snap)
+  const parts = [`vmq 잡음 ${count.held}건`, `대기 ${count.waiting}건`, `예약 위반 ${count.violations}건`]
+  if (count.dead > 0) parts.push(`프로세스 없음 ${count.dead}건`)
+  if (snap.ended.length > 0) parts.push(`끝난 예약 ${snap.ended.length}줄`)
+  return parts.join(' · ')
+}
+
+const controlPrompt = (lines: string[]) => [
+  `[vmq-view] 큐에서 새로 생긴 판정 ${lines.length}건:`,
+  ...lines.map(line => `- ${line}`),
+  '처리(~/.claude/CLAUDE.md §18 과 vmq-main 역할 지시문): 예약 위반은 그 프로젝트 관리 세션(poieve-main · doghoodie-main)에 SendMessage 로 알린다.',
+  '프로세스 없음은 LC_ALL=C TZ=UTC ps -o lstart= -p <pid> 로 대조해 죽었을 때만 vmq force-release 하고, 전후 vmq status 줄을 관리 세션에 알린다.',
+  '끝난 예약 줄은 ~/Library/Application Support/vmq/reservations.tsv 에서 지운다.',
+].join('\n')
+
+// 명령이 실패하거나(종료 코드 · 시작 실패 · 시간 초과) 출력이 JSON 이 아니면 error 로 돌려준다.
+const load = async ($: EngineInterface, home: string, rulesText: string, at: number): Promise<{ raw: Raw; next: Snapshot } | { error: string }> => {
+  try {
+    const raw = await readRaw($, home)
+    return { raw, next: buildSnapshot(raw.status, raw.agents, rulesText, at) }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+// 이번 로드에서 읽기가 한 번이라도 성공했는가. register 가 로드마다 새로 만든다.
+type Polling = { hasSucceeded: boolean }
+
+// 읽어서 snapshot 을 바꾸고, 새 판정이 있으면 toast 를 띄우고, vmq-main 세션이면 모델에 넘긴다.
+// 2026-11-11 사용자 결정 「첫 폴링은 알리지 말고 목록만 채워」: 이번 로드에서 처음 성공한 읽기는 snapshot.flagged 만
+// 그때의 판정 키로 채우고 toast · prompt 를 하지 않는다. $.state 의 snapshot 은 reload 를 넘어 남고 새 세션에서는 비므로,
+// 어느 경우든 이미 있던 판정을 새것으로 알리지 않으려고 모듈 로드 단위로 센다. 읽기 실패는 성공으로 세지 않는다.
+const poll = async ($: EngineInterface, polling: Polling) => {
+  const home = await $.env.get('HOME')
+  if (!home) return $.ui.status('vmq 읽기 실패: HOME 이 없다')
+  const at = await $.clock.now()
+  const previous = await read($, snapshot)
+  const paths = pathsOf(home)
+  const rulesText = (await $.fs.exists(paths.rules)) ? await $.fs.read(paths.rules) : ''
+  const loaded = await load($, home, rulesText, at)
+  if ('error' in loaded) {
+    const failed = { ...previous, at, error: loaded.error }
+    await update($, snapshot, () => failed)
+    return $.ui.status(statusLine(failed))
+  }
+  const { raw, next } = loaded
+  await update($, snapshot, () => next)
+  $.ui.status(statusLine(next))
+  const isFirstSuccess = !polling.hasSucceeded
+  polling.hasSucceeded = true
+  if (isFirstSuccess) return
+  const fresh = flagEntries(next).filter(one => !previous.flagged.includes(one.key))
+  if (fresh.length == 0) return
+  $.ui.toast(`vmq: ${fresh[0]?.text}${fresh.length > 1 ? ` 외 ${fresh.length - 1}건` : ''} (/vmq)`, { timeoutMs: 8000 })
+  const name = sessionNameOf(raw.agents, await $.session.id())
+  if (name != CONTROL_SESSION) return
+  void $.prompt.submit({ text: controlPrompt(fresh.map(one => one.text)) })
+}
+
+const STATE_TEXT: Record<Row['state'], string> = { held: '잡음', assigned: '배정', waiting: '대기' }
+
+const rowText = (row: Row) => {
+  const session = row.isBuild ? `${row.session} 빌드` : row.session
+  const expiry = `${Math.floor(row.seconds / 60)}분(${row.basis == 'holdMax' ? '상한' : 'lease'})`
+  const verdicts = row.verdicts.map(one => one.text).join(' · ')
+  return [STATE_TEXT[row.state], session, row.project, row.targets.join(','), expiry, verdicts, row.label].filter(part => part != '').join(' · ')
+}
+
+const colorOf = (row: Row) => {
+  if (row.verdicts.some(one => one.kind == 'violation')) return 'red'
+  if (row.verdicts.some(one => one.kind == 'dead')) return 'yellow'
+  return undefined
+}
+
+const headerText = (snap: Snapshot) => {
+  if (snap.at == 0) return 'vmq 읽는 중'
+  const time = new Date(snap.at).toISOString().slice(11, 19)
+  return `${time} UTC · ${statusLine(snap)}`
+}
+
+const drawView = async ($: EngineInterface, e: Resolvable, columns: number) => {
+  const { Box, Text } = $.ui.resolve(e)
+  const snap = await read($, snapshot)
+  return (
+    <Box flexDirection="column" width={columns}>
+      <Text bold wrap="truncate-end">{headerText(snap)}</Text>
+      {snap.ended.map(text => <Text color="yellow" wrap="truncate-end">끝난 예약 줄: {text}</Text>)}
+      {snap.badLines > 0 && <Text color="yellow" wrap="truncate-end">reservations.tsv 에서 읽지 못한 줄 {snap.badLines}줄</Text>}
+      {snap.at != 0 && snap.rows.length == 0 && <Text dimColor>큐에 요청이 없다.</Text>}
+      {snap.rows.map(row => <Text color={colorOf(row)} dimColor={row.state == 'waiting' && colorOf(row) == undefined} wrap="truncate-end">{rowText(row)}</Text>)}
+    </Box>
+  )
+}
+
+// 칸에 놓인 동안에는 자기 pane 을 열지 않는다. 칸이 비워졌을 때만 다시 열어, 사람이 닫은 pane 은 닫힌 채로 둔다.
+const placeOwnPane = async ($: EngineInterface, layout: unknown, previous: unknown) => {
+  const isPlaced = placementIn(layout, PLUGIN) != undefined
+  const isOpen = (await $.ui.panes()).some(pane => pane.id == PANE)
+  if (isPlaced && isOpen) return $.ui.close({ id: PANE })
+  if (isPlaced || isOpen || placementIn(previous, PLUGIN) == undefined) return
+  await $.ui.open({ id: PANE, title: TITLE })
+}
+
+export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    await $.command.register({ name: 'vmq', description: 'vmq 큐의 요청을 세션 · 프로젝트 · 예약 판정과 함께 pane 에 보여 준다' })
+    // 첫 읽기도 타이머로 돌린다. session.start 의 dispatch 가 끝난 뒤까지 $ 를 쓰면 그 dispatch 와 함께 끊길 수 있다.
+    const polling: Polling = { hasSucceeded: false }
+    $.clock.after(1, () => { void poll($, polling) })
+    $.clock.every(POLL_MS, () => { void poll($, polling) })
+    return next(e)
+  })
+
+  on('command.run', { command: 'vmq' }, async $ => {
+    const placement = await readPlacement($, PLUGIN)
+    if (placement) return { text: `vmq-view 는 pane-grid 의 ${placement.tab} 탭 ${placement.cell} 칸에 그려져 있다.` }
+    await $.ui.open({ id: PANE, title: TITLE })
+    return { text: 'vmq pane 을 열었다.' }
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => drawView($, e, e.props.bodyColumns))
+
+  on('ui.render', { component: 'Pane', requestId: /^grid-/ }, async ($, e, next) => {
+    const placement = await readPlacement($, PLUGIN)
+    const below = await next(e)
+    const { Box, Button } = $.ui.resolve(e)
+    const offered = offerChoice(below, PLUGIN, placement, choice => <Button key={choice.key} plain label={choice.label} hotkey={choice.hotkey} onPress={() => {}} />)
+    if (!placement || placement.requestId != e.requestId) return offered
+    const columns = placement.columns > 0 ? placement.columns : e.props.bodyColumns
+    const cell = (
+      <Box key={`cell:${PLUGIN}`} flexDirection="column">
+        {await drawView($, e, columns)}
+      </Box>
+    )
+    return fillSlot(offered, PLUGIN, cell) ?? <Box flexDirection="column">{offered}{cell}</Box>
+  })
+
+  on('state.set', { plugin: 'pane-grid' as never, key: 'layout' as never }, async ($, e, next) => {
+    const write = e as StateWrite
+    const result = await next(e)
+    await placeOwnPane($, write.value, write.previous)
+    return result
+  })
+}

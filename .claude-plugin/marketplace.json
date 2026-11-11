@@ -1,0 +1,13 @@
+{
+  "name": "vmq",
+  "owner": {
+    "name": "UHD"
+  },
+  "description": "vmq 제어 큐를 Claude Code 안에 보이는 mod",
+  "plugins": [
+    {
+      "name": "vmq-view",
+      "source": "./mod/vmq-view"
+    }
+  ]
+}

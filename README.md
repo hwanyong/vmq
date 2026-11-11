@@ -54,6 +54,9 @@
 | `lib/vmq.zsh` | 큐 · 배정 · `vmq_require`. 프로젝트 도구가 `source` 한다 |
 | `lib/peek.zsh` | 차례 없는 읽기의 판별(`peek_allowed`). 프로젝트 도구가 `source` 한다 |
 | `tests/stress.zsh` · `tests/peek.zsh` · `tests/keepalive.zsh` · `tests/pair.zsh` | 회귀 시험(아래 「시험」) |
+| `mod/vmq-view/` | Claude Code mod `vmq-view`(아래 「mod vmq-view」) |
+| `.claude-plugin/marketplace.json` | 이 저장소를 plugin marketplace `vmq` 로 등록한다. 들어 있는 plugin 은 `vmq-view` 한 개다 |
+| `~/Library/Caches/vmq-view/status.json` | mod `vmq-view` 가 쓰는 `vmq status --json` · `claude agents --json --all` 의 stdout 캐시 |
 | `~/Library/Application Support/vmq/queue/` | 차례표 · `log`. 로컬 디스크에 둔다(SMB 에서는 원자적 `mkdir` 을 믿지 않는다). poieve 의 옛 경로 `~/Library/Application Support/Poieve-CloudLLM-VM/queue` 는 2026-10-12 01:31 에 이곳을 가리키는 심볼릭 링크로 바꿨다 |
 | `~/Library/Application Support/vmq/reservations.tsv` | 예약 · 우선순위(아래 「예약」). 세션 `vmq-main` 이 적고 mod `vmq-view` 와 각 세션이 읽는다. vmq 명령은 읽지 않는다 |
 
@@ -106,6 +109,43 @@
 | 7 근거 | 누가 언제 정했나(사용자 지시 원문) |
 
 소유자가 세션 id 를 담지 않으면(`VM_QUEUE_OWNER=k126-build` 처럼 직접 정한 이름) 프로젝트를 알 수 없어 판정하지 않는다.
+
+## mod vmq-view
+
+`mod/vmq-view/` 는 Claude Code mod(hooks 모듈 `hooks/register.tsx` 가 있는 plugin)다. 30초마다 `vmq status --json` · `claude agents --json --all` 의 stdout 과 `reservations.tsv` 를 읽어 차례마다 세션 이름 · 프로젝트 · 예약 판정을 붙여 보인다. 큐와 `reservations.tsv` 는 바꾸지 않는다. vmq 명령은 이 mod 를 모른다.
+
+| 자리 | 보이는 것 |
+|---|---|
+| status line | `vmq 잡음 <n>건 · 대기 <n>건 · 예약 위반 <n>건`. 그런 차례 · 줄이 있으면 `프로세스 없음 <n>건` · `끝난 예약 <n>줄` 을 더한다. 읽기가 실패하면 `vmq 읽기 실패: <오류 메시지>`(종료 코드와 stderr 첫 줄) |
+| pane `vmq` | `/vmq` 가 연다. 첫 줄은 읽은 시각(UTC)과 status line 의 글자다. 끝난 예약 줄 · `reservations.tsv` 에서 읽지 못한 줄 수를 노랑으로 보이고, 차례마다 한 줄에 상태(잡음 · 배정 · 대기) · 세션 이름 · 프로젝트 · 대상 · 만료까지 남은 분(`상한` 또는 `lease`) · 판정 · 설명을 보인다. 예약 위반이 있는 줄은 빨강, 프로세스 없음 줄은 노랑이다 |
+| pane-grid 칸 | plugin `pane-grid` 가 설치되어 있으면 그 grid 의 빈 칸에 `vmq-view` 를 고를 수 있다. 칸에 놓인 동안에는 pane `vmq` 를 닫고, `/vmq` 는 pane 을 여는 대신 그 탭 · 칸 이름을 알린다 |
+| toast | 판정이 새로 생기면 8초 동안 첫 판정과 나머지 건수 |
+
+판정은 `hooks/model.ts` 가 낸다.
+
+| 판정 | 조건 |
+|---|---|
+| `only` 위반 | 그 줄의 대상을 잡거나 기다리는 차례의 세션 cwd 가 프로젝트 경로 밖이다 |
+| `max` 위반 | 프로젝트 경로 아래 세션이 그 줄의 대상을 쥔 차례를 일련번호 순으로 셌을 때 상한을 넘는 뒤쪽 차례다 |
+| 프로세스 없음 | 대상을 잡았고 `alive[]` 가 비었고 `expiry.basis` 가 `lease` 이고 `expiry.since` 가 120초를 넘었다 |
+| 판정 못 함 | 소유자에서 세션 id 를 뽑지 못했거나 `claude agents` 에 그 세션이 없다. 알리지 않는다 |
+
+세션 이름과 cwd 는 소유자에서 뽑은 세션 id 를 `claude agents --json --all` 의 `sessionId` 와 대조해 얻는다. 프로젝트 이름은 cwd 에서 `/.claude/worktrees/<이름>` 을 뗀 마지막 디렉터리 이름이다. 소유자가 `smbbuild-` 로 시작하면 세션 이름 뒤에 `빌드` 를 붙인다.
+
+| 규칙 | 정한 것 |
+|---|---|
+| 공유 캐시 | 두 명령의 stdout 을 `~/Library/Caches/vmq-view/status.json` 에 함께 적는다. 이 파일의 수정 시각이 25초(`CACHE_MS`) 안이면 명령을 부르지 않고 이 파일을 읽는다. `vmq status` 는 큐 잠금을 쥔 채 약 2.2초 돌므로 세션마다 30초마다 부르면 세션 수만큼 잠금을 쥔다 |
+| 첫 폴링 | mod 를 로드한 뒤 처음 성공한 읽기는 판정 목록만 채우고 toast · prompt 를 내지 않는다(2026-11-11 사용자 결정 「첫 폴링은 알리지 말고 목록만 채워」). 읽기 실패는 성공으로 세지 않는다 |
+| 모델에 넘기기 | 새 판정이 있을 때 `$.prompt.submit` 은 세션 이름이 `vmq-main` 일 때만 부른다. 넘기는 글에는 판정 줄과 처리 차례(관리 세션에 SendMessage · `ps -o lstart=` 대조 뒤 `vmq force-release` · 끝난 예약 줄 지우기)가 들어 있다. 다른 세션은 status line 과 toast 만 쓴다 |
+
+설치는 한 번 한다.
+
+```sh
+claude plugin marketplace add ~/.claude/tools/vmq
+claude plugin install vmq-view@vmq --scope user
+```
+
+`mod/vmq-view/` 를 고쳐 main 에 합친 뒤에는 쓰는 세션마다 `/reload-plugins` 를 실행한다. 고친 판은 `.claude-plugin/plugin.json` 의 `version` 을 올리고, `claude plugin validate mod/vmq-view` 로 확인한다.
 
 ## 프로젝트에 붙이는 법
 

@@ -24,3 +24,7 @@ SMBBuild1	10.10.10.2	smbbuild
 SMBBuild2	10.10.10.2	smbbuild
 SMBBuild3	10.10.10.2	smbbuild
 SMBBuild4	10.10.10.2	smbbuild
+# 2026-10-29 사용자 결정(rea_cathode 세션, 「1: (가)」): Doghoodie 의 GUI 검증(L4·L6·L7·L8, 원본 Cathode.app A/B)은 Mac Studio 데스크톱에서 이 대상의 차례를 받은 동안만 한다. 원본 Cathode.app 은 x86_64 라 Rosetta 가 있는 Mac Studio 에서만 실행된다(Mac mini 는 arch -x86_64 가 Bad CPU type).
+StudioDesktop	10.10.10.2	desktop,cathode
+# 2026-11-05: Mac mini 데스크톱의 앱 창(시스템 설정 등)을 cua-remote-mac 으로 다룰 때 받는 차례. VM 창은 위 PoieveServer2 · PoieveClient2 가 갖는다.
+MiniDesktop	10.10.10.1	desktop

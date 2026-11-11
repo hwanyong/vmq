@@ -121,8 +121,12 @@ covers() {
 
 # 차례를 만들거나 바꾼다: register <소유자> <묶음>… → 새로 만들었으면 0, 이미 있었으면 3, 거절이면 1
 # 잡은 뒤에는 바꾸지 않는다: 잡은 채 더 받으면 VM 마다의 순서가 어긋나 교착이 생길 수 있다. 기다리는 동안에는 같은 일련번호로 바꾼다.
-# 잡은 차례에 적힌 사슬(chain, lib/vmq.zsh 의 vmq_chain_mark)이 끝났으면 4: 그 사슬의 뒷정리가 아직 그 차례로 VM 을 끄고 되돌리는 중이라
-# 같은 소유자에게도 넘기지 않는다. 부른 쪽(register_wait)은 그 차례가 놓일 때까지 기다린 뒤 새로 등록한다(poieve tracker bug_1792779968019_9ycb6f).
+# 잡은 차례에 적힌 사슬(chain, lib/vmq.zsh 의 vmq_chain_mark)이 끝났으면 4: 그 사슬의 뒷정리가 아직 그 차례로 VM 을 끄고 되돌리는 중일 수 있어
+# 같은 소유자에게도 넘기지 않는다. 부른 쪽(register_wait)은 그 차례가 없어질 때까지 기다린 뒤 새로 등록한다(poieve tracker bug_1792779968019_9ycb6f).
+# 4 를 돌려줄 때는 그 차례 파일의 시각(마지막 활동)을 새로 적지 않는다. 그래서 차례표를 정리만 하는 vmq_settle 을 부르고, 4 가 아닐 때만
+# vmq_touch 로 시각을 적는다. 뒷정리가 놓지 않은 차례는 마지막 활동에서 VMQ_LEASE 초 뒤 vmq_purge 가 지우고, 이 함수는 그 뒤 새 일련번호로 등록한다.
+# 전에는 4 일 때도 vmq_sync 가 시각을 새로 적어, 2초마다 다시 부르는 register_wait 가 그 차례를 만료되지 않게 했다. 차례에 적힌 프로세스 네 개가
+# 모두 끝났는데 같은 소유자의 두 번째 acquire 가 「마지막 활동 0초 전」 을 유지했고, 뒤에서 기다리던 다른 소유자가 받지 못했다(2026-11-11 08:55Z, 일련번호 2775).
 register() {
   local owner=$1 vm k f seq rc=3 c chain all=()
   shift
@@ -130,12 +134,13 @@ register() {
   vmq_all_members "$@"; all=($reply)
   vmq_lock || return 1
   {
-    vmq_sync $owner
+    vmq_settle $owner
     k=$REPLY
     chain=${k:+$(vmq_field ${Q_file[$k]} chain)}
-    if [[ -n $k && -n ${Q_held[$k]} && -n $chain ]] && ! vmq_procs_alive $chain >/dev/null; then
-      rc=4
-    elif [[ -n $k && -n ${Q_held[$k]} ]]; then
+    # 끝난 사슬이 쥔 차례: 시각을 새로 적지 않고 4 를 돌려준다. 이 return 에도 always 의 vmq_unlock 은 실행된다
+    [[ -n $k && -n ${Q_held[$k]} && -n $chain ]] && ! vmq_procs_alive $chain >/dev/null && return 4
+    vmq_touch "$k"
+    if [[ -n $k && -n ${Q_held[$k]} ]]; then
       if ! covers "${Q_held[$k]}" "$@"; then
         print -u2 "제어 대상 큐: 이 소유자는 이미 ${Q_held[$k]} 를 잡았다. $need 가 필요하면 vmq release 한 뒤 함께 acquire 한다"
         rc=1
@@ -164,15 +169,19 @@ register() {
   return $rc
 }
 
-# register 가 4(끝난 사슬의 차례가 아직 놓이지 않음)이면 놓일 때까지 2초마다 다시 등록한다: register_wait <소유자> <제한 초(0 이면 끝없이)> <묶음>…
-# 돌려주는 값은 register 와 같고, 제한 안에 놓이지 않으면 75.
+# register 가 4(끝난 사슬이 쥔 차례가 아직 남아 있음)이면 그 차례가 없어질 때까지 2초마다 register 를 다시 부른다:
+# register_wait <소유자> <제한 초(0 이면 끝없이)> <묶음>…
+# 그 차례는 뒷정리가 놓거나(vmq release), 놓지 않으면 마지막 활동에서 VMQ_LEASE 초 뒤 만료되어 없어진다. 기다리는 동안 register 는 그 차례의
+# 시각을 새로 적지 않는다. 그 차례에 적힌 프로세스(procs)가 살아 있고 마지막 제어 명령 · 갱신(active)에서 VMQ_HOLD_MAX 초가 지나지 않은 동안은
+# 차례표를 읽는 쪽(vmq_purge)이 시각을 새로 적어 만료되지 않는다.
+# 돌려주는 값은 register 와 같고, 제한 안에 없어지지 않으면 75.
 register_wait() {
   local owner=$1 limit=$2 start=$EPOCHSECONDS rc told=0
   shift 2
   while true; do
     register $owner "$@"; rc=$?
     (( rc == 4 )) || return $rc
-    (( told )) || { print -u2 "제어 대상 큐: 이 소유자의 끝난 사슬이 쥔 차례가 아직 놓이지 않았다(그 사슬의 뒷정리가 VM 을 끄고 되돌리는 중). 놓인 뒤 새로 받는다"; told=1 }
+    (( told )) || { print -u2 "제어 대상 큐: 이 소유자의 끝난 사슬이 쥔 차례가 아직 남아 있다(그 사슬의 뒷정리가 VM 을 끄고 되돌리는 중일 수 있다). 뒷정리가 놓으면 바로, 놓지 않으면 그 차례가 마지막 활동에서 ${VMQ_LEASE}초 뒤 만료된 다음 이 명령이 새로 등록한다(그 차례에 적힌 프로세스가 살아 있으면 마지막 제어 명령 · 갱신에서 ${VMQ_HOLD_MAX}초까지는 만료되지 않는다)"; told=1 }
     (( limit > 0 && EPOCHSECONDS - start >= limit )) && return 75
     sleep 2
   done

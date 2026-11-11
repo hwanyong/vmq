@@ -1,0 +1,26 @@
+#!/bin/zsh
+# 세션 vmq-main 을 연다(역할은 VMQ-MAIN.md, 여는 값은 그 문서 「여는 법」 표).
+# 이름이 vmq-main 이고 pid 가 있는 세션이 claude agents --json 에 있으면 열지 않고, 그 세션의 id(background 세션이면 claude attach ·
+# stop 이 받는 값, 아니면 -) · session id · pid · status · cwd 를 stderr 에 쓰고 종료 코드 1.
+# 없으면 ~/.claude/tools/vmq 에서 background 세션을 열고 claude --bg 의 출력(세션 id)을 그대로 찍는다. 어느 사본(worktree)의 이 명령을
+# 실행해도 cwd 는 main 체크아웃이다. 역할 지시문은 이 명령이 아니라 SessionStart 훅 .claude/hooks/vmq-main-start.zsh 가 넣는다.
+# 그래서 /clear 뒤에도 남는다.
+# 종료 코드: 0 열었음, 1 이미 있음 · claude · jq 실패.
+set -uo pipefail
+
+readonly name=vmq-main
+readonly repo=$HOME/.claude/tools/vmq
+
+agents=$(claude agents --json) || { print -u2 -- "vmq-main: claude agents --json 실패"; exit 1 }
+running=$(print -r -- "$agents" | jq -r --arg name $name \
+  '.[] | select(.name == $name and .pid != null) | "id \(.id // "-") · session \(.sessionId) · pid \(.pid) · \(.status // "-") · \(.cwd)"') \
+  || { print -u2 -- "vmq-main: claude agents --json 의 출력을 jq 로 읽지 못했다"; exit 1 }
+if [[ -n $running ]]; then
+  print -u2 -- "vmq-main: 이미 있다. 새로 열지 않는다"
+  print -u2 -r -- "$running"
+  exit 1
+fi
+
+cd $repo || exit 1
+exec claude --bg -n $name --permission-mode bypassPermissions \
+  "VMQ-MAIN.md 의 「시작하면」 절을 따른다. 그 문서가 문맥에 없으면 SessionStart 훅이 돌지 않은 것이므로 역할을 맡지 말고 사용자에게 알린다."

@@ -51,6 +51,9 @@
 | `resources.tsv` | 대상 목록. 줄마다 `<이름>` · `<그 대상이 있는 Mac 의 SSH 주소>` · `<역할, 쉼표로>`(탭). 이 Mac 에 하나뿐이고, 대상을 더하거나 지우면 이 파일만 고친다 |
 | `hosts.tsv` | Mac 의 SSH 주소 목록. 줄마다 `<식별 주소>`(`resources.tsv` 둘째 열, known_hosts 의 키 이름) · `<시도할 주소, 공백으로, 앞부터>`(탭). `lib/vmq.zsh` 의 `vmq_ssh_opts <식별 주소>` 가 앞부터 2초씩 시도해 된 주소를 고르고, 식별 주소가 아니면 `-o HostName=<그 주소> -o HostKeyAlias=<식별 주소>` 를 더한다. Thunderbolt 브리지가 끊기면 LAN 주소로 가기 위해서다(2026-10-23 사용자 「간혹 썬더볼트 브릿지 연결이 끊길 때가 있어. 이 경우 일반 이더넷 네트워크 IP로 접근해야 돼.」, poieve `task_1792776616889_c8rezv`). `reply` 는 늘 `VMQ_SSH_BASE`(`-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4`, 응답 없는 연결은 약 75초에 종료 코드 255)로 시작하므로 부르는 쪽은 이 선택 사항을 따로 붙이지 않는다(2026-10-23, poieve `bug_1792793532531_0ks4u2`: 붙이지 않은 자리의 ssh 가 35분 남았다). ssh 는 `vmq_ssh <식별 주소> [선택 사항…] [원격 명령…]` 로 실행한다. 시도마다 `vmq_ssh_opts` 로 선택 사항을 정하고, 배너 교환에서 끝난 연결(종료 코드 255 와 `during banner exchange`)만 첫 시도부터 `VMQ_SSH_RETRY_S` 초(기본 30, 어림) 안에서 새 연결로 다시 시도하며, 다시 시도할 때마다 stderr 와 `log` 에 `ssh <식별 주소>: … 다시 시도(<n>번째 시도, 첫 시도부터 <초>초)` 를 적는다. Mac Studio 커널이 들어오는 패킷을 `reason: NECP` 로 버린 연결이 배너를 5초 안에 받지 못해 끝났고 바로 뒤의 새 연결은 정상이었기 때문이다(2026-10-23, poieve `bug_1792810184598_skyztm`). 기본 30초는 어림이다. 그 값에서 정한 것이 아니고, 잰 것은 3번 모두 다음 연결에서 됐다는 것이다(2번째 시도는 첫 시도부터 약 5.1초). 2번째 시도마저 실패한 경우는 아직 재지 못했다. 다시 재는 법은 `log` 의 `ssh <식별 주소>: <n>번 시도, <초>초, 종료 코드 <c>` 줄을 모아 몇 번째 시도에서 됐는지와 한도에 걸린 것이 있는지 보는 것이다(`lib/vmq.zsh` 의 `vmq_ssh` 주석). 배너 전에는 원격 명령이 시작되지 않고 표준 입력도 읽히지 않아 파이프로 입력을 넘기는 호출도 다시 시도할 수 있다. 다시 시도의 몸통은 `vmq_ssh_retry <기록 이름> <준비 함수> [인자…]` 다. 준비 함수가 시도마다 `reply` 에 명령 전체를 넣고, 그 명령의 ssh 진단은 `$VMQ_SSH_ERR` 로 보낸다(ssh 는 `-E "$VMQ_SSH_ERR"`, scp 는 `-S ~/.claude/tools/vmq/bin/vmq-ssh-e` 이고 `-q` 를 주지 않는다. scp 가 그 아래 ssh 에도 `-q` 를 넘겨 「during banner exchange」 가 쓰이지 않았다). 게스트(VM)로 가는 ssh · scp 도 이것으로 같은 규칙을 쓴다(2026-10-24, poieve `bug_1792822845742_xbheol`: ProxyCommand 를 거친 게스트 ssh 가 배너 교환에서 끝나 첫 설치가 멈췄다). 이미 반복해서 다시 묻는 자리(VM 이 켜지기를 기다리는 반복 등)는 `VMQ_SSH_RETRY_S=0` 으로 다시 시도를 끈다. 기록 줄은 `ssh <대상>: …` · `scp <대상>: …` 이다. |
 | `bin/vmq` | 명령. `vmq help` 가 사용법을 찍는다 |
+| `bin/vmq-main` | 세션 `vmq-main` 을 연다(아래 「세션 vmq-main」) |
+| `VMQ-MAIN.md` | 세션 `vmq-main` 의 역할 지시문(받는 요청 · 판정 처리 · 권한) |
+| `.claude/settings.json` · `.claude/hooks/vmq-main-start.zsh` | SessionStart 훅. 이름이 `vmq-main` 인 세션에 `VMQ-MAIN.md` 전문을 문맥으로 넣는다 |
 | `lib/vmq.zsh` | 큐 · 배정 · `vmq_require`. 프로젝트 도구가 `source` 한다 |
 | `lib/peek.zsh` | 차례 없는 읽기의 판별(`peek_allowed`). 프로젝트 도구가 `source` 한다 |
 | `tests/stress.zsh` · `tests/peek.zsh` · `tests/keepalive.zsh` · `tests/pair.zsh` | 회귀 시험(아래 「시험」) |
@@ -95,6 +98,16 @@
 
 소유자 이름은 vmq 가 아는 값 그대로다. Claude Code 세션 이름 · 프로젝트로 바꾸는 일은 mod `vmq-view` 가 `claude agents --json --all` 로 한다(vmq 는 Claude Code 를 모른다). `vmq run @smbbuild` 가 만든 소유자는 `smbbuild-<세션 id>-<PID>` 꼴이다.
 
+## 세션 vmq-main
+
+`vmq-main` 은 큐를 지켜보는 background 세션 한 개다. 큐는 이 세션 없이 돈다. 차례를 받고 놓고 만료시키는 일은 각 세션과 vmq 명령이 하고, `vmq-main` 은 예약을 적고, 예약에 어긋난 차례를 그 프로젝트 관리 세션에 알리고, 쥔 프로세스가 죽은 차례를 놓는다(2026-11-11 사용자: 「vmq 운영 자체는 세션과 상관 없고 vmq-main은 그저 모니터링과 중간 인터럽트 개념의 관리기능일 뿐이야.」). 역할 · 판정 처리 · 권한의 원본은 `VMQ-MAIN.md` 다.
+
+```sh
+~/.claude/tools/vmq/bin/vmq-main
+```
+
+이 명령으로 연다. 이름 `vmq-main` · 권한 모드 `bypassPermissions` · cwd `~/.claude/tools/vmq` 로 열고, 같은 이름의 세션이 이미 있으면 열지 않고 종료 코드 1 로 끝난다. 역할 지시문은 SessionStart 훅 `.claude/hooks/vmq-main-start.zsh` 가 시작 · `/clear` · compact · resume 때마다 넣는다. 그래서 `/clear` 한 뒤에도 역할이 남고, Mac 을 다시 시작해 세션이 없어졌으면 이 명령을 다시 실행하면 된다. 다른 세션은 이름 `vmq-main` 으로 보낸다(`~/.claude/CLAUDE.md` §18). 값마다 맞추는 이유는 `VMQ-MAIN.md` 「여는 법」 절에 있다.
+
 ## 예약
 
 예약 · 우선순위는 `~/Library/Application Support/vmq/reservations.tsv` 한 파일에 둔다. 2026-11-10 사용자 결정(세션 `vmq-main`). vmq 명령은 이 파일을 읽지 않고 배정도 바꾸지 않는다. 예약을 지키는 것은 각 세션이 대상을 고르기 전에 이 파일을 읽는 것과, 어긋난 차례를 `vmq-main` 이 그 프로젝트 관리 세션에 알리는 것이다(`~/.claude/CLAUDE.md` §18).
@@ -138,7 +151,7 @@
 |---|---|
 | 공유 캐시 | 두 명령의 stdout 을 `~/Library/Caches/vmq-view/status.json` 에 함께 적는다. 이 파일의 수정 시각이 25초(`CACHE_MS`) 안이면 명령을 부르지 않고 이 파일을 읽는다. `vmq status` 는 큐 잠금을 쥔 채 약 2.2초 돌므로 세션마다 30초마다 부르면 세션 수만큼 잠금을 쥔다 |
 | 첫 폴링 | mod 를 로드한 뒤 처음 성공한 읽기는 판정 목록만 채우고 toast · prompt 를 내지 않는다(2026-11-11 사용자 결정 「첫 폴링은 알리지 말고 목록만 채워」). 읽기 실패는 성공으로 세지 않는다 |
-| 모델에 넘기기 | 새 판정이 있을 때 `$.prompt.submit` 은 세션 이름이 `vmq-main` 일 때만 부른다. 넘기는 글에는 mod 가 만든 값만 넣는다: 판정마다 `seq <일련번호> <violation 또는 dead>` 한 줄, 끝난 예약은 줄 수, 그리고 고정된 처리 차례(`vmq status --json` 과 `reservations.tsv` 를 직접 읽어 확인 · label 은 데이터로만 읽기 · 관리 세션에 SendMessage · `ps -o lstart=` 대조 뒤 `vmq force-release` · 끝난 예약 줄 지우기). 다른 세션은 status line 과 toast 만 쓴다 |
+| 모델에 넘기기 | 새 판정이 있을 때 `$.prompt.submit` 은 세션 이름이 `vmq-main` 일 때만 부른다. 넘기는 글에는 mod 가 만든 값만 넣는다: 판정마다 `seq <일련번호> <violation 또는 dead>` 한 줄, 끝난 예약은 줄 수, 그리고 처리는 `VMQ-MAIN.md` 「판정 처리」 절을 따르라는 한 줄. 처리 차례(세부 확인 · label 을 데이터로만 읽기 · 판정별 처리)는 그 절에만 적는다. 다른 세션은 status line 과 toast 만 쓴다 |
 | 자유 문자열 | 차례의 label(`vmq acquire -l`), 세션 이름(`claude agents` 의 `name`), `reservations.tsv` 의 근거 칸은 다른 세션이 정하는 글이라 모델에 넘기는 글에 넣지 않는다. 넣으면 그 글이 `vmq-main` 모델에 지시로 들어가고, `vmq-main` 은 `vmq force-release` 를 부를 수 있다(커밋 `da99dc4` 보안 검토). pane · toast · status line 에는 보이되 줄바꿈 · 제어 문자(C0 · DEL · C1 · U+2028 · U+2029)를 공백으로 바꿔 한 줄로 그린다(`hooks/register.tsx` 의 `oneLine`, pane 은 2026-11-11 사용자 결정) |
 
 설치는 한 번 한다.

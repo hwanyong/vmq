@@ -17,6 +17,12 @@ export type Row = {
   verdicts: Verdict[]
 }
 
+// 알릴 판정 한 건. key 는 중복 판정에, text 는 사람에게(pane · toast) 쓴다. text 에는 다른 세션이 정한 자유 문자열
+// (차례의 label · 세션 이름 · reservations.tsv 의 근거 칸)이 들어가므로 모델에 넘길 때는 kind · seq 만 쓴다.
+export type Flag =
+  | { key: string; text: string; kind: 'violation' | 'dead'; seq: number }
+  | { key: string; text: string; kind: 'ended' }
+
 // 한 번 읽은 결과. flagged 는 알린 판정의 키 목록이고, 다음 읽기에서 새로 생긴 것만 알리는 데 쓴다.
 export type Snapshot = {
   at: number

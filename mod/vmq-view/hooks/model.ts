@@ -1,4 +1,4 @@
-import type { Row, Snapshot, Verdict } from '../types'
+import type { Flag, Row, Snapshot, Verdict } from '../types'
 
 // vmq status --json(version 1)에서 이 mod 가 읽는 칸. 형식은 vmq README 「status --json」 절.
 type VmqRequest = {
@@ -106,12 +106,15 @@ const rowOf = (owned: Owned, verdicts: Verdict[]): Row => ({
 
 const STATE_ORDER: Record<Row['state'], number> = { held: 0, assigned: 1, waiting: 2 }
 
-// 알릴 판정 하나하나의 키와 한 줄 설명. unknown 은 알리지 않으므로 넣지 않는다.
-export const flagEntries = (snapshot: Pick<Snapshot, 'rows' | 'ended'>): { key: string; text: string }[] => [
-  ...snapshot.rows.flatMap(row => row.verdicts
-    .filter(one => one.kind != 'unknown')
-    .map(one => ({ key: `${row.key}:${one.kind}:${one.text}`, text: `${row.session} seq ${row.seq} (${row.label}): ${one.text}` }))),
-  ...snapshot.ended.map(text => ({ key: `ended:${text}`, text: `끝난 예약 줄: ${text}` })),
+// 알릴 판정 하나하나. unknown 은 알리지 않으므로 넣지 않는다.
+export const flagEntries = (snapshot: Pick<Snapshot, 'rows' | 'ended'>): Flag[] => [
+  ...snapshot.rows.flatMap(row => row.verdicts.flatMap((one): Flag[] => one.kind == 'unknown' ? [] : [{
+    key: `${row.key}:${one.kind}:${one.text}`,
+    text: `${row.session} seq ${row.seq} (${row.label}): ${one.text}`,
+    kind: one.kind,
+    seq: row.seq,
+  }])),
+  ...snapshot.ended.map((text): Flag => ({ key: `ended:${text}`, text: `끝난 예약 줄: ${text}`, kind: 'ended' })),
 ]
 
 // claude agents --json --all 의 출력에서 세션 id 의 이름. 없으면 undefined.

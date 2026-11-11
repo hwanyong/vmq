@@ -15,7 +15,8 @@ type VmqRequest = {
 type VmqStatus = { now: number; requests: VmqRequest[] }
 
 // claude agents --json --all 의 한 줄에서 읽는 칸. name 은 null 일 수 있다.
-type Agent = { sessionId?: string; name?: string | null; cwd?: string }
+// status 는 2026-11-11 실제 출력(21줄)에서 busy · idle · waiting(waitingFor: permission prompt) · null(state done) 네 가지였다.
+type Agent = { sessionId?: string; name?: string | null; cwd?: string; status?: string | null }
 
 // reservations.tsv 의 한 줄. 형식은 vmq README 「예약」 절(탭으로 나눈 일곱 칸).
 type Rule = { kind: 'only' | 'max'; targets: string[]; path: string; limit: number; start: number; end: number; text: string }
@@ -52,13 +53,14 @@ const parseRules = (text: string): { rules: Rule[]; badLines: number } => {
 
 const overlaps = (a: readonly string[], b: readonly string[]) => a.some(name => b.includes(name))
 
-type Owned = { request: VmqRequest; session: string; cwd: string | undefined; isBuild: boolean }
+// isBusy 는 주인 세션의 status 가 busy 인가. 주인 세션을 찾지 못하면(UUID 없음 · agents 에 없음) undefined.
+type Owned = { request: VmqRequest; session: string; cwd: string | undefined; isBuild: boolean; isBusy: boolean | undefined }
 
 const ownerOf = (request: VmqRequest, agents: readonly Agent[]): Owned => {
   const id = request.owner.match(UUID)?.[0]
   const agent = id ? agents.find(one => one.sessionId == id) : undefined
   const session = agent?.name ?? (id ? id.slice(0, 8) : request.owner)
-  return { request, session, cwd: agent?.cwd, isBuild: request.owner.startsWith(BUILD_PREFIX) }
+  return { request, session, cwd: agent?.cwd, isBuild: request.owner.startsWith(BUILD_PREFIX), isBusy: agent ? agent.status == 'busy' : undefined }
 }
 
 // only 줄: 그 대상을 잡거나 기다리는 차례가 프로젝트 경로 밖 세션이면 위반. 세션을 모르면 판정하지 않는다.
@@ -84,8 +86,11 @@ const maxVerdicts = (rule: Rule, owned: readonly Owned[]): Map<string, Verdict> 
   return verdicts
 }
 
-const isDead = (request: VmqRequest) =>
-  request.held.length > 0 && request.alive.length == 0 && request.expiry.basis == 'lease' && request.expiry.since > DEAD_AFTER
+// 주인 세션이 busy 면 프로세스 없음으로 보지 않는다. 짧은 명령마다 차례를 갱신하는 세션은 명령 사이에 살아 있는 프로세스가
+// 0개라 프로세스 조건만으로는 오탐이 났다(seq 2704, 2026-11-11 사용자 결정 「응, 그 조건 더해」). 주인 세션을 찾지 못하면
+// 프로세스 조건만으로 본다. idle · waiting · null 은 busy 가 아니다.
+const isDead = ({ request, isBusy }: Owned) =>
+  isBusy != true && request.held.length > 0 && request.alive.length == 0 && request.expiry.basis == 'lease' && request.expiry.since > DEAD_AFTER
 
 const stateOf = (request: VmqRequest): Row['state'] => {
   if (request.held.length > 0) return 'held'
@@ -138,7 +143,7 @@ export const buildSnapshot = (statusText: string, agentsText: string, rulesText:
       const verdict = rule.kind == 'only' ? onlyVerdict(rule, one) : fromMax.get(rule)?.get(one.request.key)
       if (verdict) verdicts.push(verdict)
     }
-    if (isDead(one.request)) verdicts.push({ kind: 'dead', key: 'dead', text: `프로세스 없음 ${Math.floor(one.request.expiry.since / 60)}분` })
+    if (isDead(one)) verdicts.push({ kind: 'dead', key: 'dead', text: `프로세스 없음 ${Math.floor(one.request.expiry.since / 60)}분` })
     return rowOf(one, verdicts)
   }).sort((a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || a.seq - b.seq)
   const ended = rules.filter(rule => rule.end <= status.now).map(rule => rule.text)

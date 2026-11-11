@@ -1,6 +1,6 @@
 {
   "name": "vmq-view",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "vmq 큐의 요청을 세션 이름 · 프로젝트 · 예약 판정과 함께 pane · status line · pane-grid 칸에 보여 준다",
   "types": "./types/index.d.ts"
 }

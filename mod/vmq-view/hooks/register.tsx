@@ -17,7 +17,7 @@ const RUN_MS = 20_000
 
 const EMPTY: Snapshot = { at: 0, rows: [], ended: [], badLines: 0, flagged: [], error: '' }
 // Snapshot 의 칸이 바뀌면 shape 를 바꾼다. 이전 판이 남긴 값은 reload 뒤에도 남는다.
-const snapshot = atom({ plugin: 'vmq-view', key: 'snapshot' } as const, EMPTY, { shape: 'snapshot-1' })
+const snapshot = atom({ plugin: 'vmq-view', key: 'snapshot' } as const, EMPTY, { shape: 'snapshot-2' })
 
 type Resolvable = Parameters<EngineInterface['ui']['resolve']>[0]
 type Raw = { status: string; agents: string }

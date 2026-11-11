@@ -1,6 +1,8 @@
 // 판정 한 가지. violation: reservations.tsv 의 줄에 어긋남. dead: 대상을 쥐었는데 살아 있는 프로세스가 없음.
 // unknown: 소유자에 세션 id 가 없어 프로젝트를 알 수 없음(README 「예약」 절).
-export type Verdict = { kind: 'violation' | 'dead' | 'unknown'; text: string }
+// key 는 같은 판정을 가르는 값이라 시간에 따라 바뀌는 값을 넣지 않는다(violation 은 예약 줄의 종류 · 대상 · 프로젝트 경로,
+// dead 는 `dead`). text 는 표시용이다. dead 의 text 는 지난 분을 담아 1분마다 바뀐다.
+export type Verdict = { kind: 'violation' | 'dead' | 'unknown'; key: string; text: string }
 
 // vmq status --json 의 requests[] 한 건에 세션 이름 · 프로젝트 · 판정을 붙인 것.
 export type Row = {

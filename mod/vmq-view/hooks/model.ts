@@ -62,11 +62,14 @@ const ownerOf = (request: VmqRequest, agents: readonly Agent[]): Owned => {
 }
 
 // only 줄: 그 대상을 잡거나 기다리는 차례가 프로젝트 경로 밖 세션이면 위반. 세션을 모르면 판정하지 않는다.
+// 예약 줄 하나를 가리키는 값. 시작 · 끝 · 근거 칸은 넣지 않는다.
+const ruleKey = (rule: Rule) => `${rule.kind}:${rule.targets.join(',')}:${rule.path}`
+
 const onlyVerdict = (rule: Rule, owned: Owned): Verdict | undefined => {
   if (!overlaps(owned.request.targets, rule.targets)) return undefined
-  if (owned.cwd == undefined) return { kind: 'unknown', text: `판정 못 함(${rule.kind} ${basename(rule.path)})` }
+  if (owned.cwd == undefined) return { kind: 'unknown', key: ruleKey(rule), text: `판정 못 함(${rule.kind} ${basename(rule.path)})` }
   if (isUnder(owned.cwd, rule.path)) return undefined
-  return { kind: 'violation', text: `위반: ${rule.targets.join(',')} 는 ${basename(rule.path)} 전용` }
+  return { kind: 'violation', key: ruleKey(rule), text: `위반: ${rule.targets.join(',')} 는 ${basename(rule.path)} 전용` }
 }
 
 // max 줄: 프로젝트 세션이 쥔 차례를 seq 순으로 세어 상한을 넘는 뒤쪽 차례가 위반.
@@ -76,7 +79,7 @@ const maxVerdicts = (rule: Rule, owned: readonly Owned[]): Map<string, Verdict> 
     .filter(one => one.cwd != undefined && isUnder(one.cwd, rule.path) && overlaps(one.request.held, rule.targets))
     .sort((a, b) => a.request.seq - b.request.seq)
   for (const one of holding.slice(rule.limit)) {
-    verdicts.set(one.request.key, { kind: 'violation', text: `위반: ${basename(rule.path)} 는 ${rule.targets.join(',')} 를 동시에 ${rule.limit}개까지` })
+    verdicts.set(one.request.key, { kind: 'violation', key: ruleKey(rule), text: `위반: ${basename(rule.path)} 는 ${rule.targets.join(',')} 를 동시에 ${rule.limit}개까지` })
   }
   return verdicts
 }
@@ -109,7 +112,7 @@ const STATE_ORDER: Record<Row['state'], number> = { held: 0, assigned: 1, waitin
 // 알릴 판정 하나하나. unknown 은 알리지 않으므로 넣지 않는다.
 export const flagEntries = (snapshot: Pick<Snapshot, 'rows' | 'ended'>): Flag[] => [
   ...snapshot.rows.flatMap(row => row.verdicts.flatMap((one): Flag[] => one.kind == 'unknown' ? [] : [{
-    key: `${row.key}:${one.kind}:${one.text}`,
+    key: `${row.key}:${one.key}`,
     text: `${row.session} seq ${row.seq} (${row.label}): ${one.text}`,
     kind: one.kind,
     seq: row.seq,
@@ -135,7 +138,7 @@ export const buildSnapshot = (statusText: string, agentsText: string, rulesText:
       const verdict = rule.kind == 'only' ? onlyVerdict(rule, one) : fromMax.get(rule)?.get(one.request.key)
       if (verdict) verdicts.push(verdict)
     }
-    if (isDead(one.request)) verdicts.push({ kind: 'dead', text: `프로세스 없음 ${Math.floor(one.request.expiry.since / 60)}분` })
+    if (isDead(one.request)) verdicts.push({ kind: 'dead', key: 'dead', text: `프로세스 없음 ${Math.floor(one.request.expiry.since / 60)}분` })
     return rowOf(one, verdicts)
   }).sort((a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || a.seq - b.seq)
   const ended = rules.filter(rule => rule.end <= status.now).map(rule => rule.text)

@@ -27,7 +27,8 @@
 # 소유자: VM_QUEUE_OWNER, 없으면 Claude Code 가 세션마다 주는 CLAUDE_CODE_SESSION_ID. 한 세션 안의 하위 에이전트(Agent 도구)는 같은
 # 세션 ID 를 물려받으므로, 하위 에이전트가 따로 대상을 다루면 VM_QUEUE_OWNER 를 따로 정한다.
 # 차례는 마지막 활동에서 VM_QUEUE_LEASE 초(기본 1200) 동안 유효하다. 제어 명령의 vmq_require 와 acquire 가 시각을 새로 적는다. 그보다
-# 오래 활동이 없는 차례는 다음에 차례표를 읽는 쪽이 지운다.
+# 오래 활동이 없는 차례는 다음에 차례표를 읽는 쪽이 지운다. 끝난 사슬이 쥔 차례를 기다리는 같은 소유자의 acquire · run 은 그 차례의 시각을
+# 새로 적지 않는다(아래 vmq_sync 의 주석).
 # 차례를 쥔 프로세스가 살아 있으면 활동이 없어도 지우지 않는다. vmq_require 가 자기를 부른 셸 프로세스($$, 스크립트면 그 스크립트)를
 # procs 에 적고, 차례표를 읽는 쪽(vmq_purge)은 그 프로세스가 살아 있으면 수정 시각을 새로 적는다. 그래서 그 프로세스가 끝나면 끝난 뒤
 # 차례표를 처음 읽은 때부터 VM_QUEUE_LEASE 초 뒤 지워진다(기다리는 쪽이 2초마다 읽는다). 마지막 제어 명령 · 갱신(active)에서 VM_QUEUE_HOLD_MAX 초
@@ -215,7 +216,8 @@ vmq_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1 }
 vmq_has() { [[ " $1 " == *" $2 "* ]] }
 
 # 차례 파일을 다시 쓴다: vmq_write <파일> <owner> <label> <created> <need> [held] [active] [procs] [chain]
-# chain 은 이 차례를 쥔 사슬 셸의 `<PID>@<시작 시각>` 이다(vmq_chain_mark). 그 사슬이 끝난 차례는 같은 소유자의 acquire 에도 넘기지 않는다(bin/vmq 의 register).
+# chain 은 이 차례를 쥔 사슬 셸의 `<PID>@<시작 시각>` 이다(vmq_chain_mark). 그 사슬이 끝난 차례는 같은 소유자의 acquire · run 에도 넘기지 않고,
+# 그 acquire · run 이 기다리는 동안 시각도 새로 적지 않는다(bin/vmq 의 register).
 vmq_write() {
   print -l "owner=$2" "label=$3" "created=$4" "need=$5" ${6:+"held=$6"} ${7:+"active=$7"} ${8:+"procs=$8"} ${9:+"chain=$9"} > "$1"
 }
@@ -416,17 +418,36 @@ vmq_commit() {
   vmq_log "잡음 $o ${Q_alloc[$k]}${l:+ ($l)}"
 }
 
-# 차례표를 정리하고 그 소유자의 차례를 갱신한다(잠금 안에서): 만료 정리 → 읽기 → 배정 → 배정되었으면 잡기 → 내 차례 파일의 시각을 새로 적기.
-# REPLY 에 그 소유자의 키(없으면 빈 값)를 남긴다.
-vmq_sync() {
-  local owner=$1 vm
+# 차례표를 정리한다(잠금 안에서): vmq_settle <소유자>. 만료 정리 → 읽기 → 배정 → 그 소유자의 차례가 배정되었으면 잡기.
+# REPLY 에 그 소유자의 키(없으면 빈 값)를 남긴다. 이 함수는 부른 소유자의 차례라는 이유로는 차례 파일의 시각을 새로 적지 않는다(vmq_touch 가 적는다).
+# 안에서 부르는 vmq_purge 는 소유자와 무관하게, 쥔 프로세스가 살아 있고 마지막 제어 명령 · 갱신에서 VMQ_HOLD_MAX 초가 지나지 않은 차례의 수정 시각을
+# 새로 적는다. vmq_commit 은 배정된 차례를 잡을 때 그 차례 파일을 다시 쓴다(수정 시각도 바뀐다).
+vmq_settle() {
   vmq_purge
   vmq_scan
   vmq_plan
-  REPLY=$(vmq_key $owner)
+  REPLY=$(vmq_key $1)
   [[ -n $REPLY ]] || return 0
   vmq_commit $REPLY
-  for vm in ${=Q_vms[$REPLY]}; do touch -- "$VMQ_DIR/$vm/$REPLY"; done
+  return 0
+}
+
+# 그 키의 차례 파일의 시각(마지막 활동)을 지금으로 새로 적는다(잠금 안에서, vmq_settle 뒤): vmq_touch <키>. 키가 빈 값이면 아무것도 하지 않는다.
+vmq_touch() {
+  local k=${1:-} vm
+  [[ -n $k ]] || return 0
+  for vm in ${=Q_vms[$k]}; do touch -- "$VMQ_DIR/$vm/$k"; done
+}
+
+# 차례표를 정리하고 그 소유자의 차례를 갱신한다(잠금 안에서): vmq_settle 뒤 vmq_touch. 만료 정리 → 읽기 → 배정 → 배정되었으면 잡기 →
+# 내 차례 파일의 시각을 새로 적기. REPLY 에 그 소유자의 키(없으면 빈 값)를 남긴다.
+# 시각을 새로 적을지를 차례의 내용을 읽은 뒤 정해야 하는 쪽은 두 함수를 따로 부른다. bin/vmq 의 register 가 그렇다: 끝난 사슬이 쥔 차례는
+# vmq_settle 만 부르고 시각을 새로 적지 않는다. 전에는 register 도 이 함수를 불러, 끝난 사슬의 차례를 기다리는 같은 소유자의 acquire · run 이
+# 2초마다 그 차례의 시각을 새로 적었다. 그 차례에 적힌 프로세스 네 개가 모두 끝난 뒤에도 차례가 만료되지 않아, 뒤에서 기다리던 다른 소유자가
+# 받지 못했다(2026-11-11 08:55Z, 일련번호 2775).
+vmq_sync() {
+  vmq_settle $1
+  vmq_touch "$REPLY"
   return 0
 }
 

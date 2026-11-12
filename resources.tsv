@@ -1,13 +1,15 @@
 # 이 Mac 에서 세션 여럿이 함께 다루는 제어 대상(전역 규약 §18, ~/.claude/tools/vmq/README.md).
-# 줄마다: <이름>	<그 대상이 있는 Mac 의 SSH 주소>	<역할, 쉼표로>. 탭으로 나눈다. 차례표 · 배정은 이 이름으로 한다.
+# 줄마다: <이름>	<그 대상이 있는 Mac 의 SSH 주소>	<역할, 쉼표로>	<운영체제>. 탭으로 나눈다. 차례표 · 배정은 이 이름으로 한다.
+# 운영체제는 그 대상 안에서 도는 운영체제다(macOS · Windows · Linux). 운영체제가 없는 대상(SMB 빌드 차례)은 `-` 다. 2026-11-11 사용자 결정으로 넷째 열을 더했다.
+# Poieve VM 네 개는 VirtualBuddy 의 macOS VM 이다(.vbvm 에 HardwareModel · MachineIdentifier · AuxiliaryStorage 가 있다). PoieveWebDocker 는 Docker Desktop 이라 컨테이너가 Linux 에서 돈다.
 # 10.10.10.1 = Mac mini, 10.10.10.2 = Mac Studio(두 Mac 을 잇는 Thunderbolt 브리지).
 # 역할은 acquire 의 묶음에 @<역할> 로 적어 후보 묶음으로 쓴다(@server 는 역할 server 를 가진 대상 전부).
 # 대상을 더하거나 지우면 이 파일만 고친다. 그 대상을 다루는 프로젝트의 도구가 이 파일에서 이름 · Mac 을 읽는다.
-PoieveServer	10.10.10.2	server,poieve
-PoieveServer2	10.10.10.1	server,poieve
-PoieveClient	10.10.10.2	client,poieve
-PoieveClient2	10.10.10.1	client,poieve
-PoieveWebDocker	10.10.10.1	web,docker
+PoieveServer	10.10.10.2	server,poieve	macOS
+PoieveServer2	10.10.10.1	server,poieve	macOS
+PoieveClient	10.10.10.2	client,poieve	macOS
+PoieveClient2	10.10.10.1	client,poieve	macOS
+PoieveWebDocker	10.10.10.1	web,docker	Linux
 # 2026-10-15 사용자 지시 「내가 지시하기 전까진 Mac Studio VirtualBuddy를 사용하지마」(RAM 부족)로 Mac Studio 의 두 줄을 막았다가, 2026-10-17 사용자 지시 「mac studio의 virtualbuddy 사용이 가능해졌어. VM 활용을 mac mini와 겸용해서 사용 가능하니」 로 다시 열었다.
 # 2026-10-21 사용자 지시 「맥 스튜디오에서 VM 테스트 하지마. 램 용량 부족해.」 · 「VM 테스트는 맥미니에서만 진행하기」 로 Mac Studio 의 두 줄을 다시 막았다.
 # 2026-10-29 사용자 지시 「이제 macstudio에 있는 virtualbuddy 사용도 승인해줄게」 로 Mac Studio 의 두 줄을 다시 열었다.
@@ -20,11 +22,11 @@ PoieveWebDocker	10.10.10.1	web,docker
 # 의 smb_build_slot). 줄 수가 상한이고 둘째 열은 빌드가 도는 Mac(Mac Studio)이다. 4 는 잰 범위 안의 값이다: Mac mini kern.num_files 가 빌드 없을 때
 # 5,860 ~ 5,956, xcodebuild 4 ~ 7개가 겹친 2026-10-22 20:22 ~ 20:42Z 에 최대 18,899 로 EMFILE 이 난 가장 낮은 값 47,715 보다 낮았다. 다시 재는 법은
 # 그 저장소 README.md §7 「SMB 빌드 차례」.
-SMBBuild1	10.10.10.2	smbbuild
-SMBBuild2	10.10.10.2	smbbuild
-SMBBuild3	10.10.10.2	smbbuild
-SMBBuild4	10.10.10.2	smbbuild
+SMBBuild1	10.10.10.2	smbbuild	-
+SMBBuild2	10.10.10.2	smbbuild	-
+SMBBuild3	10.10.10.2	smbbuild	-
+SMBBuild4	10.10.10.2	smbbuild	-
 # 2026-10-29 사용자 결정(rea_cathode 세션, 「1: (가)」): Doghoodie 의 GUI 검증(L4·L6·L7·L8, 원본 Cathode.app A/B)은 Mac Studio 데스크톱에서 이 대상의 차례를 받은 동안만 한다. 원본 Cathode.app 은 x86_64 라 Rosetta 가 있는 Mac Studio 에서만 실행된다(Mac mini 는 arch -x86_64 가 Bad CPU type).
-StudioDesktop	10.10.10.2	desktop,cathode
+StudioDesktop	10.10.10.2	desktop,cathode	macOS
 # 2026-11-05: Mac mini 데스크톱의 앱 창(시스템 설정 등)을 cua-remote-mac 으로 다룰 때 받는 차례. VM 창은 위 PoieveServer2 · PoieveClient2 가 갖는다.
-MiniDesktop	10.10.10.1	desktop
+MiniDesktop	10.10.10.1	desktop	macOS

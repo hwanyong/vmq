@@ -48,7 +48,7 @@
 
 | 경로 | 무엇 |
 |---|---|
-| `resources.tsv` | 대상 목록. 줄마다 `<이름>` · `<그 대상이 있는 Mac 의 SSH 주소>` · `<역할, 쉼표로>`(탭). 이 Mac 에 하나뿐이고, 대상을 더하거나 지우면 이 파일만 고친다 |
+| `resources.tsv` | 대상 목록. 줄마다 `<이름>` · `<그 대상이 있는 Mac 의 SSH 주소>` · `<역할, 쉼표로>` · `<운영체제>`(탭). 운영체제는 그 대상 안에서 도는 운영체제(`macOS` · `Windows` · `Linux`)이고, 운영체제가 없는 대상(SMB 빌드 차례)은 `-` 다(2026-11-11 사용자 결정). 이 Mac 에 하나뿐이고, 대상을 더하거나 지우면 이 파일만 고친다 |
 | `hosts.tsv` | Mac 의 SSH 주소 목록. 줄마다 `<식별 주소>`(`resources.tsv` 둘째 열, known_hosts 의 키 이름) · `<시도할 주소, 공백으로, 앞부터>`(탭). `lib/vmq.zsh` 의 `vmq_ssh_opts <식별 주소>` 가 앞부터 2초씩 시도해 된 주소를 고르고, 식별 주소가 아니면 `-o HostName=<그 주소> -o HostKeyAlias=<식별 주소>` 를 더한다. Thunderbolt 브리지가 끊기면 LAN 주소로 가기 위해서다(2026-10-23 사용자 「간혹 썬더볼트 브릿지 연결이 끊길 때가 있어. 이 경우 일반 이더넷 네트워크 IP로 접근해야 돼.」, poieve `task_1792776616889_c8rezv`). `reply` 는 늘 `VMQ_SSH_BASE`(`-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4`, 응답 없는 연결은 약 75초에 종료 코드 255)로 시작하므로 부르는 쪽은 이 선택 사항을 따로 붙이지 않는다(2026-10-23, poieve `bug_1792793532531_0ks4u2`: 붙이지 않은 자리의 ssh 가 35분 남았다). ssh 는 `vmq_ssh <식별 주소> [선택 사항…] [원격 명령…]` 로 실행한다. 시도마다 `vmq_ssh_opts` 로 선택 사항을 정하고, 배너 교환에서 끝난 연결(종료 코드 255 와 `during banner exchange`)만 첫 시도부터 `VMQ_SSH_RETRY_S` 초(기본 30, 어림) 안에서 새 연결로 다시 시도하며, 다시 시도할 때마다 stderr 와 `log` 에 `ssh <식별 주소>: … 다시 시도(<n>번째 시도, 첫 시도부터 <초>초)` 를 적는다. Mac Studio 커널이 들어오는 패킷을 `reason: NECP` 로 버린 연결이 배너를 5초 안에 받지 못해 끝났고 바로 뒤의 새 연결은 정상이었기 때문이다(2026-10-23, poieve `bug_1792810184598_skyztm`). 기본 30초는 어림이다. 그 값에서 정한 것이 아니고, 잰 것은 3번 모두 다음 연결에서 됐다는 것이다(2번째 시도는 첫 시도부터 약 5.1초). 2번째 시도마저 실패한 경우는 아직 재지 못했다. 다시 재는 법은 `log` 의 `ssh <식별 주소>: <n>번 시도, <초>초, 종료 코드 <c>` 줄을 모아 몇 번째 시도에서 됐는지와 한도에 걸린 것이 있는지 보는 것이다(`lib/vmq.zsh` 의 `vmq_ssh` 주석). 배너 전에는 원격 명령이 시작되지 않고 표준 입력도 읽히지 않아 파이프로 입력을 넘기는 호출도 다시 시도할 수 있다. 다시 시도의 몸통은 `vmq_ssh_retry <기록 이름> <준비 함수> [인자…]` 다. 준비 함수가 시도마다 `reply` 에 명령 전체를 넣고, 그 명령의 ssh 진단은 `$VMQ_SSH_ERR` 로 보낸다(ssh 는 `-E "$VMQ_SSH_ERR"`, scp 는 `-S ~/.claude/tools/vmq/bin/vmq-ssh-e` 이고 `-q` 를 주지 않는다. scp 가 그 아래 ssh 에도 `-q` 를 넘겨 「during banner exchange」 가 쓰이지 않았다). 게스트(VM)로 가는 ssh · scp 도 이것으로 같은 규칙을 쓴다(2026-10-24, poieve `bug_1792822845742_xbheol`: ProxyCommand 를 거친 게스트 ssh 가 배너 교환에서 끝나 첫 설치가 멈췄다). 이미 반복해서 다시 묻는 자리(VM 이 켜지기를 기다리는 반복 등)는 `VMQ_SSH_RETRY_S=0` 으로 다시 시도를 끈다. 기록 줄은 `ssh <대상>: …` · `scp <대상>: …` 이다. |
 | `bin/vmq` | 명령. `vmq help` 가 사용법을 찍는다 |
 | `bin/vmq-main` | 세션 `vmq-main` 을 연다(아래 「세션 vmq-main」) |
@@ -92,7 +92,7 @@
 | `version` | 형식 판. 지금 1. 필드를 지우거나 뜻을 바꾸면 올린다 |
 | `now` · `lease` · `holdMax` · `starve` | 판정한 시각(epoch 초)과 그때의 `VMQ_LEASE` · `VMQ_HOLD_MAX` · `VMQ_STARVE`(초) |
 | `owner` | 부른 쪽의 소유자(`VM_QUEUE_OWNER` 또는 `CLAUDE_CODE_SESSION_ID`). 없으면 `null` |
-| `targets[]` | 대상마다 `name` · `host` · `roles[]` · `holder`(잡은 차례의 키 또는 `null`) · `assigned`(기다리던 차례가 다음 확인에서 잡을 키) · `reserved`(`VMQ_STARVE` 가 지난 차례가 맡아 둔 키) · `waiting[]`(기다리는 차례의 키, 차례표 순서) |
+| `targets[]` | 대상마다 `name` · `host` · `roles[]` · `os`(`resources.tsv` 넷째 열, `-` 이면 `null`) · `holder`(잡은 차례의 키 또는 `null`) · `assigned`(기다리던 차례가 다음 확인에서 잡을 키) · `reserved`(`VMQ_STARVE` 가 지난 차례가 맡아 둔 키) · `waiting[]`(기다리는 차례의 키, 차례표 순서) |
 | `requests[]` | 차례(요청)마다 한 개. 인자로 준 대상에 차례 파일이 있는 것만 낸다. `key`(`<일련번호>-<소유자>`) · `seq` · `owner` · `isMine` · `label` · `need[]`(묶음마다 한 개, 묶음 안은 `,` 로 이은 후보, 후보 안은 `+` 로 이은 대상) · `targets[]`(차례 파일이 있는 대상) · `held[]`(잡은 대상, 기다리면 빈 배열) · `assigned[]`(배정되어 다음 확인에서 잡을 대상) · `created` · `active`(epoch 초, 없으면 0) · `procs[]` · `alive[]`(그 가운데 지금 살아 있는 것) · `expiry` |
 | `expiry` | 차례 단위 판정이다(`vmq_key_expiry`). `basis` 가 `holdMax` 면 그 차례의 파일 가운데 하나라도 쥔 프로세스가 살아 있어 `active` 에서 `holdMax` 초에 만료되고, `lease` 면 마지막 활동(그 차례의 파일 가운데 가장 최근 수정 시각)에서 `lease` 초에 만료된다. `seconds` 는 만료까지 남은 초, `since` 는 그 기준 시각에서 지난 초다 |
 
@@ -132,7 +132,7 @@
 | 자리 | 보이는 것 |
 |---|---|
 | status line | `vmq 잡음 <n>건 · 대기 <n>건 · 예약 위반 <n>건`. 그런 차례 · 줄이 있으면 `프로세스 없음 <n>건` · `만료 임박 <n>건` · `끝난 예약 <n>줄` 을 더한다. 읽기가 실패하면 `vmq 읽기 실패: <오류 메시지>`(종료 코드와 stderr 첫 줄) |
-| pane `vmq` | `/vmq` 가 연다. 첫 줄은 읽은 시각(UTC)과 status line 의 글자다. 끝난 예약 줄 · `reservations.tsv` 에서 읽지 못한 줄 수를 노랑으로 보이고, 그 아래는 열을 맞춘 표다. 머리 줄(흐리게) 다음에 차례마다 두 줄을 보인다: 첫 줄은 상태(잡음 · 배정 · 대기) · 세션 이름 · 프로젝트 · 대상 · 만료까지 남은 분(`상한` 또는 `lease`) · 판정, 둘째 줄은 들여 쓴 설명(label, 흐리게)이다. 열 폭은 그 열에서 가장 넓은 값이고 열마다 상한이 있어 넘는 값은 끝을 자른다(`register.tsx` 의 `COLUMNS`). 예약 위반이 있는 줄은 빨강, 프로세스 없음 줄은 노랑, 만료 임박 줄은 청록이다 |
+| pane `vmq` | `/vmq` 가 연다. 첫 줄은 읽은 시각(UTC)과 status line 의 글자다. 끝난 예약 줄 · `reservations.tsv` 에서 읽지 못한 줄 수를 노랑으로 보이고, 그 아래는 열을 맞춘 표다. 머리 줄(흐리게) 다음에 차례마다 두 줄을 보인다: 첫 줄은 상태(잡음 · 배정 · 대기) · 세션 이름 · 프로젝트 · 대상 · 운영체제(그 대상들의 `os` 를 겹치지 않게 이은 것, 없으면 `-`) · 만료까지 남은 분(`상한` 또는 `lease`) · 판정, 둘째 줄은 들여 쓴 설명(label, 흐리게)이다. 열 폭은 그 열에서 가장 넓은 값이고 열마다 상한이 있어 넘는 값은 끝을 자른다(`register.tsx` 의 `COLUMNS`). 예약 위반이 있는 줄은 빨강, 프로세스 없음 줄은 노랑, 만료 임박 줄은 청록이다 |
 | pane-grid 칸 | plugin `pane-grid` 가 설치되어 있으면 그 grid 의 빈 칸에 `vmq-view` 를 고를 수 있다. 칸에 놓인 동안에는 pane `vmq` 를 닫고, `/vmq` 는 pane 을 여는 대신 그 탭 · 칸 이름을 알린다 |
 | toast | 판정이 새로 생기면 8초 동안 첫 판정과 나머지 건수 |
 

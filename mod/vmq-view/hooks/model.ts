@@ -12,7 +12,9 @@ type VmqRequest = {
   alive: string[]
   expiry: { basis: string; seconds: number; since: number }
 }
-type VmqStatus = { now: number; requests: VmqRequest[] }
+// os 는 resources.tsv 넷째 열이고 운영체제가 없는 대상(`-`)은 null 이다.
+type VmqTarget = { name: string; os: string | null }
+type VmqStatus = { now: number; targets: VmqTarget[]; requests: VmqRequest[] }
 
 // claude agents --json --all 의 한 줄에서 읽는 칸. name 은 null 일 수 있다.
 // status 는 2026-11-11 실제 출력(21줄)에서 busy · idle · waiting(waitingFor: permission prompt) · null(state done) 네 가지였다.
@@ -107,19 +109,27 @@ const stateOf = (request: VmqRequest): Row['state'] => {
   return 'waiting'
 }
 
-const rowOf = (owned: Owned, verdicts: Verdict[]): Row => ({
-  key: owned.request.key,
-  seq: owned.request.seq,
-  session: owned.session,
-  project: owned.cwd ? basename(owned.cwd.replace(WORKTREE_PART, '')) : '-',
-  isBuild: owned.isBuild,
-  label: owned.request.label,
-  targets: owned.request.held.length > 0 ? owned.request.held : owned.request.targets,
-  state: stateOf(owned.request),
-  basis: owned.request.expiry.basis,
-  seconds: owned.request.expiry.seconds,
-  verdicts,
-})
+// 대상 이름 → 운영체제. 운영체제가 없는 대상은 넣지 않는다.
+const systemsOf = (targets: readonly VmqTarget[]) =>
+  new Map(targets.flatMap((one): [string, string][] => one.os == null ? [] : [[one.name, one.os]]))
+
+const rowOf = (owned: Owned, verdicts: Verdict[], systems: ReadonlyMap<string, string>): Row => {
+  const targets = owned.request.held.length > 0 ? owned.request.held : owned.request.targets
+  return {
+    key: owned.request.key,
+    seq: owned.request.seq,
+    session: owned.session,
+    project: owned.cwd ? basename(owned.cwd.replace(WORKTREE_PART, '')) : '-',
+    isBuild: owned.isBuild,
+    label: owned.request.label,
+    targets,
+    systems: [...new Set(targets.flatMap(name => systems.get(name) ?? []))],
+    state: stateOf(owned.request),
+    basis: owned.request.expiry.basis,
+    seconds: owned.request.expiry.seconds,
+    verdicts,
+  }
+}
 
 const STATE_ORDER: Record<Row['state'], number> = { held: 0, assigned: 1, waiting: 2 }
 
@@ -145,6 +155,7 @@ export const buildSnapshot = (statusText: string, agentsText: string, rulesText:
   const { rules, badLines } = parseRules(rulesText)
   const active = rules.filter(rule => rule.start <= status.now && status.now < rule.end)
   const owned = status.requests.map(request => ownerOf(request, agents))
+  const systems = systemsOf(status.targets)
   const fromMax = new Map(active.filter(rule => rule.kind == 'max').map(rule => [rule, maxVerdicts(rule, owned)]))
   const rows = owned.map(one => {
     const verdicts: Verdict[] = []
@@ -154,7 +165,7 @@ export const buildSnapshot = (statusText: string, agentsText: string, rulesText:
     }
     if (isDead(one)) verdicts.push({ kind: 'dead', key: 'dead', text: `프로세스 없음 ${Math.floor(one.request.expiry.since / 60)}분` })
     if (isExpiring(one)) verdicts.push({ kind: 'expiring', key: 'expiring', text: `만료 임박 ${Math.max(0, one.request.expiry.seconds)}초` })
-    return rowOf(one, verdicts)
+    return rowOf(one, verdicts, systems)
   }).sort((a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || a.seq - b.seq)
   const ended = rules.filter(rule => rule.end <= status.now).map(rule => rule.text)
   const snapshot = { at, rows, ended, badLines, error: '' }

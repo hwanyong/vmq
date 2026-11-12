@@ -5,7 +5,7 @@
 # 프로젝트의 도구가 제어 명령 앞에서 vmq_require 를 불러, 차례가 없으면 아무것도 하기 전에 거절한다. 2026-10-12 사용자 지시 「Vm 운영
 # 방법은글로벌 규칙과 툴로 적용해줘」로 poieve 의 CloudLLM-Claude-code/tools 에서 이곳으로 옮겼다.
 #
-# 대상 목록: VMQ_REGISTRY(기본 ~/.claude/tools/vmq/resources.tsv). 줄마다 <이름> <Mac> <역할들>(탭). 이 Mac 하나에 하나뿐이다.
+# 대상 목록: VMQ_REGISTRY(기본 ~/.claude/tools/vmq/resources.tsv). 줄마다 <이름> <Mac> <역할들> <운영체제>(탭). 이 Mac 하나에 하나뿐이다.
 # 차례표: VMQ_DIR(기본 ~/Library/Application Support/vmq/queue). 이 Mac 의 로컬 디스크에 둔다. SMB · 네트워크 디스크에서는 원자적인
 # mkdir 을 믿지 않는다. 다른 Mac 에 있는 대상도 그 대상을 다루는 명령을 실행하는 Mac 의 차례표를 쓴다. 도구가 다른 Mac 에서 자기를 다시
 # 실행할 때는 VM_QUEUE_INTERNAL=1 로 검사를 건너뛴다.
@@ -54,15 +54,16 @@ typeset -gA Q_vms Q_file Q_need Q_held Q_alloc Q_busy
 # 만료 판정(차례 파일 하나는 vmq_expiry, 차례 하나는 vmq_key_expiry)
 typeset -ga Q_exp
 
-# 대상 목록을 읽는다. VMQ_HOST[이름] = Mac, VMQ_ROLES[이름] = 역할(공백으로 나눔)
-typeset -gA VMQ_HOST VMQ_ROLES
+# 대상 목록을 읽는다. VMQ_HOST[이름] = Mac, VMQ_ROLES[이름] = 역할(공백으로 나눔), VMQ_OS[이름] = 그 대상의 운영체제(`-` 는 운영체제가
+# 없는 대상). 넷째 열은 2026-11-11 에 더했다. read 의 마지막 이름은 남은 열을 모두 받으므로 os 를 두지 않으면 넷째 열이 roles 에 붙는다.
+typeset -gA VMQ_HOST VMQ_ROLES VMQ_OS
 vmq_load_registry() {
-  local name host roles
-  VMQ_HOST=() VMQ_ROLES=()
+  local name host roles os
+  VMQ_HOST=() VMQ_ROLES=() VMQ_OS=()
   [[ -r $VMQ_REGISTRY ]] || { print -u2 "제어 대상 큐: 대상 목록이 없다: $VMQ_REGISTRY"; return 1 }
-  while IFS=$'\t' read -r name host roles; do
+  while IFS=$'\t' read -r name host roles os; do
     [[ -z $name || $name == \#* ]] && continue
-    VMQ_HOST[$name]=$host VMQ_ROLES[$name]=${roles//,/ }
+    VMQ_HOST[$name]=$host VMQ_ROLES[$name]=${roles//,/ } VMQ_OS[$name]=${os:--}
   done < "$VMQ_REGISTRY"
 }
 vmq_load_registry

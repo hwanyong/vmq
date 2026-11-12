@@ -86,6 +86,7 @@ status_json() {
     json_str "$vm"; fields+=("\"name\":$REPLY")
     json_str "${VMQ_HOST[$vm]:-}"; fields+=("\"host\":$REPLY")
     json_arr ${=VMQ_ROLES[$vm]:-}; fields+=("\"roles\":$REPLY")
+    json_opt "${VMQ_OS[$vm]:#-}"; fields+=("\"os\":$REPLY")
     json_opt "$hk"; fields+=("\"holder\":$REPLY")
     # 배정됨: 기다리던 차례가 다음 확인에서 잡을 대상. 맡아 둠: VMQ_STARVE 가 지난 차례가 맡아 둔 대상(vmq_plan 의 「~」)
     [[ -n $busy && $busy != "~"* && $busy != $hk ]] && json_str "$busy" || REPLY=null; fields+=("\"assigned\":$REPLY")
@@ -240,7 +241,7 @@ peek-check)
   ;;
 list)
   # 대상 목록(VMQ_REGISTRY)
-  for v in ${(ok)VMQ_HOST}; do print -r -- "$v	${VMQ_HOST[$v]}	${VMQ_ROLES[$v]// /,}"; done
+  for v in ${(ok)VMQ_HOST}; do print -r -- "$v	${VMQ_HOST[$v]}	${VMQ_ROLES[$v]// /,}	${VMQ_OS[$v]}"; done
   ;;
 acquire)
   parse "$@"

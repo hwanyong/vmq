@@ -14,6 +14,8 @@ export type Row = {
   isBuild: boolean
   label: string
   targets: string[]
+  // targets 의 운영체제(resources.tsv 넷째 열)를 겹치지 않게 모은 것. 운영체제가 없는 대상(`-`)은 넣지 않는다.
+  systems: string[]
   state: 'held' | 'assigned' | 'waiting'
   basis: string
   seconds: number

@@ -17,7 +17,7 @@ const RUN_MS = 20_000
 
 const EMPTY: Snapshot = { at: 0, rows: [], ended: [], badLines: 0, flagged: [], error: '' }
 // Snapshot 의 칸이 바뀌면 shape 를 바꾼다. 이전 판이 남긴 값은 reload 뒤에도 남는다.
-const snapshot = atom({ plugin: 'vmq-view', key: 'snapshot' } as const, EMPTY, { shape: 'snapshot-2' })
+const snapshot = atom({ plugin: 'vmq-view', key: 'snapshot' } as const, EMPTY, { shape: 'snapshot-3' })
 
 type Resolvable = Parameters<EngineInterface['ui']['resolve']>[0]
 type Raw = { status: string; agents: string }
@@ -151,6 +151,7 @@ const COLUMNS: readonly Column[] = [
   { title: '세션', max: 18, text: row => (row.isBuild ? `${row.session} 빌드` : row.session) },
   { title: '프로젝트', max: 14, text: row => row.project },
   { title: '대상', max: 30, text: row => row.targets.join(',') },
+  { title: '운영체제', max: 14, text: row => row.systems.join(',') || '-' },
   { title: '만료', max: 10, text: row => `${Math.floor(row.seconds / 60)}분 ${row.basis == 'holdMax' ? '상한' : 'lease'}` },
 ]
 const COLUMN_GAP = 2

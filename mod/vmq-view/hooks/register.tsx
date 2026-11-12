@@ -140,12 +140,25 @@ const poll = async ($: EngineInterface, polling: Polling) => {
 
 const STATE_TEXT: Record<Row['state'], string> = { held: '잡음', assigned: '배정', waiting: '대기' }
 
-const rowText = (row: Row) => {
-  const session = row.isBuild ? `${row.session} 빌드` : row.session
-  const expiry = `${Math.floor(row.seconds / 60)}분(${row.basis == 'holdMax' ? '상한' : 'lease'})`
-  const verdicts = row.verdicts.map(one => one.text).join(' · ')
-  return [STATE_TEXT[row.state], session, row.project, row.targets.join(','), expiry, verdicts, row.label].filter(part => part != '').join(' · ')
-}
+// 터미널에서 한 글자가 차지하는 칸 수. 한글 · 한자 · 전각 문자는 2칸, 나머지는 1칸으로 센다(East Asian Width 의 W · F 범위).
+const WIDE = /[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua960-\ua97f\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/u
+const widthOf = (text: string) => [...text].reduce((sum, char) => sum + (WIDE.test(char) ? 2 : 1), 0)
+
+// 표의 열. 판정 열은 남은 폭을 모두 쓰므로 여기 넣지 않는다. max 는 열 폭의 상한(칸)이고, 넘는 값은 끝을 자른다.
+type Column = { title: string; max: number; text: (row: Row) => string }
+const COLUMNS: readonly Column[] = [
+  { title: '상태', max: 4, text: row => STATE_TEXT[row.state] },
+  { title: '세션', max: 18, text: row => (row.isBuild ? `${row.session} 빌드` : row.session) },
+  { title: '프로젝트', max: 14, text: row => row.project },
+  { title: '대상', max: 30, text: row => row.targets.join(',') },
+  { title: '만료', max: 10, text: row => `${Math.floor(row.seconds / 60)}분 ${row.basis == 'holdMax' ? '상한' : 'lease'}` },
+]
+const COLUMN_GAP = 2
+const LABEL_INDENT = 2
+
+// 열 폭은 머리 글자와 그 열 값 가운데 가장 넓은 것이고, 열의 max 를 넘지 않는다.
+const widthsOf = (rows: readonly Row[]) =>
+  COLUMNS.map(column => Math.min(column.max, Math.max(widthOf(column.title), ...rows.map(row => widthOf(oneLine(column.text(row)))))))
 
 const colorOf = (row: Row) => {
   if (row.verdicts.some(one => one.kind == 'violation')) return 'red'
@@ -163,13 +176,40 @@ const headerText = (snap: Snapshot) => {
 const drawView = async ($: EngineInterface, e: Resolvable, columns: number) => {
   const { Box, Text } = $.ui.resolve(e)
   const snap = await read($, snapshot)
+  const widths = widthsOf(snap.rows)
+  const cells = (texts: readonly string[], color: string | undefined, isDim: boolean, rest: string) => (
+    <Box flexDirection="row" columnGap={COLUMN_GAP}>
+      {texts.map((text, index) => (
+        <Box width={widths[index]} flexShrink={0}>
+          <Text color={color} dimColor={isDim} wrap="truncate-end">{text}</Text>
+        </Box>
+      ))}
+      <Box flexGrow={1} flexShrink={1}>
+        <Text color={color} dimColor={isDim} wrap="truncate-end">{rest}</Text>
+      </Box>
+    </Box>
+  )
   return (
     <Box flexDirection="column" width={columns}>
       <Text bold wrap="truncate-end">{headerText(snap)}</Text>
       {snap.ended.map(text => <Text color="yellow" wrap="truncate-end">{oneLine(`끝난 예약 줄: ${text}`)}</Text>)}
       {snap.badLines > 0 && <Text color="yellow" wrap="truncate-end">reservations.tsv 에서 읽지 못한 줄 {snap.badLines}줄</Text>}
       {snap.at != 0 && snap.rows.length == 0 && <Text dimColor>큐에 요청이 없다.</Text>}
-      {snap.rows.map(row => <Text color={colorOf(row)} dimColor={row.state == 'waiting' && colorOf(row) == undefined} wrap="truncate-end">{oneLine(rowText(row))}</Text>)}
+      {snap.rows.length > 0 && cells(COLUMNS.map(column => column.title), undefined, true, '판정')}
+      {snap.rows.map(row => {
+        const color = colorOf(row)
+        const isDim = row.state == 'waiting' && color == undefined
+        return (
+          <Box flexDirection="column">
+            {cells(COLUMNS.map(column => oneLine(column.text(row))), color, isDim, oneLine(row.verdicts.map(one => one.text).join(' · ')))}
+            {row.label != '' && (
+              <Box marginLeft={LABEL_INDENT}>
+                <Text dimColor wrap="truncate-end">{oneLine(row.label)}</Text>
+              </Box>
+            )}
+          </Box>
+        )
+      })}
     </Box>
   )
 }

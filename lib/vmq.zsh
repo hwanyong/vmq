@@ -598,24 +598,54 @@ vmq_chain_of() {
 # 사슬이 도는 중에 차례가 지워질 수 있었다(2026-10-16 bug_1792137322422_fwsach 와 같은 일, poieve task_1793209230273_b2regj). 사슬의 단계는
 # 모두 poieve 의 chain_step 기다림 반복을 지나므로 그 반복 한 곳이 이 함수를 부른다. 부르는 프로세스가 끝나면 갱신도 멈춰 위 「만료」 규칙이 그대로
 # 걸린다. 살아 있지만 멈춘 사슬은 chain_step 의 단계 한도가 끝내므로, 갱신이 이어지는 시간은 그 사슬에 적힌 단계 한도의 합을 넘지 않는다.
+# 종료 코드는 세 가지다(2026-11-13 사용자 승인, doghoodie-main 보고). 0: 갱신함. 1: 이 프로세스가 쥔 차례가 없음(만료 · 강제로 놓음 · 잡지 않음 ·
+# procs 에 $$ 가 없음 · VM_QUEUE_TICKET 이 다름 · 소유자 없음). 이유를 stderr 에 쓴다. 75: 차례표 잠금을 얻지 못한 일시 실패. 차례는 그대로이고
+# 다음 호출에서 다시 갱신한다(75 는 acquire 의 「기다리는 중」과 같은 값). 전에는 둘 다 1 이었고 차례를 잃은 경우는 stderr 가 비어, 부르는 쪽이 둘을
+# 가르지 못했다. rea_cathode 의 tools/studio_keepalive.zsh 는 1 이면 끝내서, 차례를 쥔 채 잠금 경합 한 번에 시험을 끝낼 수 있었다.
 VMQ_KEEPALIVE=$(( VMQ_HOLD_MAX / 6 ))
 vmq_keepalive() {
   [[ ${VM_QUEUE_INTERNAL:-} == 1 ]] && return 0
-  local owner me vm f ok=0
-  me=$(vmq_proc_id $$) || return 1
+  local owner me vm f why=
+  me=$(vmq_proc_id $$) || { print -u2 -r -- "제어 대상 큐: 이 셸(pid $$)의 시작 시각을 읽지 못해 활동을 갱신하지 못했다"; return 1 }
   owner=$(vmq_owner) || return 1
-  vmq_lock || return 1
+  vmq_lock || return 75
   {
     vmq_settle $owner
-    if vmq_ticket_ok $owner "$REPLY" && [[ -n $REPLY && -n ${Q_held[$REPLY]:-} ]] && vmq_has "$(vmq_procs_alive "$(vmq_field ${Q_file[$REPLY]} procs)")" $me; then
-      ok=1
+    if ! vmq_ticket_ok $owner "$REPLY"; then
+      why=ticket
+    elif [[ -z $REPLY ]]; then
+      why="소유자 $owner 의 차례가 없다(만료되었거나 강제로 놓였거나 받지 않았다)"
+    elif [[ -z ${Q_held[$REPLY]:-} ]]; then
+      why="소유자 $owner 의 차례 ${REPLY%%-*} 는 아직 대상을 잡지 않고 기다린다"
+    elif ! vmq_has "$(vmq_procs_alive "$(vmq_field ${Q_file[$REPLY]} procs)")" $me; then
+      why="이 셸(pid $$)이 차례 ${REPLY%%-*} 의 procs 에 없다(vmq_require 를 이 셸에서 부르지 않았다)"
+    else
       for vm in ${=Q_vms[$REPLY]}; do
         f="$VMQ_DIR/$vm/$REPLY"
         vmq_write $f "$(vmq_field $f owner)" "$(vmq_field $f label)" "$(vmq_field $f created)" "$(vmq_field $f need)" "$(vmq_field $f held)" $EPOCHSECONDS "$(vmq_field $f procs)" "$(vmq_field $f chain)"
       done
     fi
   } always { vmq_unlock }
-  (( ok ))
+  [[ -z $why ]] && return 0
+  # ticket 은 vmq_ticket_ok 가 이미 stderr 에 이유를 썼다
+  [[ $why == ticket ]] || print -u2 -r -- "제어 대상 큐: 활동을 갱신하지 못했다. $why"
+  return 1
+}
+
+# 갱신하고, 차례를 잃었으면 스크립트를 끝낸다: vmq_keepalive_or_exit. vmq_keepalive 가 1 이면 stderr 에 쓰고 exit 1, 75(잠금 일시 실패)면 stderr 에
+# 경고만 쓰고 0. 차례를 잃은 뒤 대상을 더 다루지 않게 하려는 것이다. 제어 명령마다 vmq_require 를 지나지 않는 스크립트(시작에서 한 번만 부르는
+# GUI 스크립트 등)가 긴 단계 사이에서 VMQ_KEEPALIVE 초보다 짧은 간격으로 부른다. 제어 명령마다 vmq_require 를 지나는 스크립트는 다음 명령이
+# 거절되므로 이것이 없어도 된다(poieve 의 chain_step 은 vmq_keepalive 를 부르고 실패를 경고로만 남긴다).
+# 스크립트의 최상위 셸에서 부른다. $(...) · 파이프 · ( ) 안에서 부르면 exit 가 그 서브셸만 끝내고 스크립트는 계속 돈다. zsh 에서는 서브셸에서도
+# $$ 가 바깥 셸의 PID 라 갱신 자체는 된다.
+# 2026-11-13 사용자 승인으로 더했다. 전에는 프로젝트가 따로 감쌌다(rea_cathode 의 tools/studio_keepalive.zsh).
+vmq_keepalive_or_exit() {
+  local code=0
+  vmq_keepalive || code=$?
+  (( code == 0 )) && return 0
+  (( code == 75 )) && { print -u2 -r -- "제어 대상 큐: 잠금을 얻지 못해 이번 갱신을 건너뛴다. 차례는 그대로이고 다음 호출에서 다시 갱신한다"; return 0 }
+  print -u2 -r -- "제어 대상 큐: 차례를 잃어 대상을 더 다루지 않고 종료 코드 1 로 끝낸다(pid $$)"
+  exit 1
 }
 
 # 프로젝트 도구가 제어 명령 앞에서 부른다: vmq_require <대상>… 차례를 가졌으면 시각과 이 셸 프로세스($$)를 적고 0, 아니면 이유를

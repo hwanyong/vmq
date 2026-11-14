@@ -243,7 +243,9 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => drawView($, e, e.props.bodyColumns))
 
-  on('ui.render', { component: 'Pane', requestId: /^grid-/ }, async ($, e, next) => {
+  // Claude Code 2.1.325 이상은 matcher 에 plugin 이 없으면 이 hook 을 등록한 plugin(vmq-view)이 연 pane 에만 맞춘다.
+  // grid pane(grid-<tab>)은 pane-grid 가 열므로 plugin: 'pane-grid' 가 없으면 이 hook 은 grid 를 그릴 때 불리지 않는다.
+  on('ui.render', { component: 'Pane', requestId: /^grid-/, plugin: 'pane-grid' }, async ($, e, next) => {
     const placement = await readPlacement($, PLUGIN)
     const below = await next(e)
     const { Box, Button } = $.ui.resolve(e)

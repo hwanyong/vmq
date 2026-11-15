@@ -151,9 +151,42 @@ vmq_ssh() { vmq_ssh_retry "ssh $1" vmq_ssh_cmd "$@" }
 # 역할을 가진 대상, 이름 순서: vmq_with_role <역할>
 vmq_with_role() { local v; for v in ${(ok)VMQ_HOST}; do vmq_has "${VMQ_ROLES[$v]}" $1 && print -r -- $v; done; true }
 
+# Doghoodie 탭의 셸에서 그 탭을 연 Claude Code 세션의 id: vmq_owner_doghoodie
+# Doghoodie 의 PreToolUse 훅은 Bash 명령을 `doghoodie run --session cc-<세션 id 앞 8자리>[/<이름>]` 로 돌리게 하고, 그 탭의 셸은
+# Doghoodie 앱이 연 login 셸이라 CLAUDE_CODE_SESSION_ID 를 물려받지 않고 부모 프로세스에도 claude 가 없다. 탭에 있는 것은 DOGHOODIE_TERMINAL ·
+# DOGHOODIE_SOCKET 이다. 그래서 `doghoodie ls --json` 에서 이 터미널의 session 이름을 읽어 앞 8자리를 얻고, `claude agents --json` 의 살아
+# 있는 세션 가운데 sessionId 가 그 8자리로 시작하는 것이 하나일 때만 그 id 를 찍는다. 2026-11-15 poieve 카드 세션 세 개(k1470 · k1471 · k1477)가
+# 이 탭에서 `vmq acquire` 가 「소유자가 없다」로 끝나 VM_QUEUE_OWNER 를 직접 넣었다(사용자 지시로 고침).
+vmq_owner_doghoodie() {
+  local t=${DOGHOODIE_TERMINAL:-} h helper inst name prefix ids
+  [[ $t =~ '^[0-9]+$' ]] || return 1
+  for h in ${commands[doghoodie]:-} $HOME/Applications/Doghoodie.app/Contents/Helpers/doghoodie /Applications/Doghoodie.app/Contents/Helpers/doghoodie; do
+    [[ -x $h ]] && { helper=$h; break }
+  done
+  [[ -n $helper ]] || { print -u2 "제어 대상 큐: Doghoodie 터미널 $t 이지만 doghoodie 실행 파일이 PATH · ~/Applications · /Applications 에 없다"; return 1 }
+  (( $+commands[jq] && $+commands[claude] )) || { print -u2 "제어 대상 큐: Doghoodie 터미널 $t 의 소유자를 정하려면 jq · claude 가 PATH 에 있어야 한다"; return 1 }
+  # 앱 인스턴스가 여럿이면 이 탭의 인스턴스(제어 소켓 control-<pid>.sock 의 pid)만 본다.
+  local -a iopt
+  inst=${${DOGHOODIE_SOCKET:t}#control-}; inst=${inst%.sock}
+  [[ $inst =~ '^[0-9]+$' ]] && iopt=(-i $inst)
+  name=$("$helper" ls $iopt --json | jq -r --argjson t $t 'map(select(.terminal == $t)) | if length == 1 then (.[0].session // "") else "" end') \
+    || { print -u2 "제어 대상 큐: doghoodie ls --json 을 읽지 못했다(Doghoodie 터미널 $t)"; return 1 }
+  prefix=${${name#cc-}%%/*}
+  [[ $name == cc-* && $prefix =~ '^[0-9a-f]{8}$' ]] \
+    || { print -u2 "제어 대상 큐: Doghoodie 터미널 $t 의 세션 이름이 cc-<세션 id 앞 8자리> 꼴이 아니다: ${name:-없음}"; return 1 }
+  ids=$(claude agents --json | jq -r --arg p $prefix '[.[] | .sessionId // empty | select(startswith($p))] | unique | .[]') \
+    || { print -u2 "제어 대상 큐: claude agents --json 을 읽지 못했다"; return 1 }
+  local -a found=(${(f)ids})
+  (( $#found == 1 )) \
+    || { print -u2 "제어 대상 큐: Doghoodie 세션 이름 $name 의 앞 8자리 $prefix 로 시작하는 살아 있는 Claude Code 세션이 ${#found}개다(1개여야 한다)"; return 1 }
+  print -r -- $found[1]
+}
+
 # 소유자 이름. 파일 이름에 들어가므로 영문 · 숫자 · . _ - 만 받는다.
+# VM_QUEUE_OWNER, 없으면 CLAUDE_CODE_SESSION_ID, 둘 다 없고 Doghoodie 탭이면 vmq_owner_doghoodie 의 값이다.
 vmq_owner() {
   local o=${VM_QUEUE_OWNER:-${CLAUDE_CODE_SESSION_ID:-}}
+  [[ -z $o && -n ${DOGHOODIE_TERMINAL:-} ]] && { o=$(vmq_owner_doghoodie) || return 1 }
   [[ -n $o ]] || { print -u2 "제어 대상 큐: 소유자가 없다. VM_QUEUE_OWNER=<이름> 을 정한다(Claude Code 세션이면 CLAUDE_CODE_SESSION_ID 를 쓴다)"; return 1 }
   [[ $o =~ '^[A-Za-z0-9._-]+$' ]] || { print -u2 "제어 대상 큐: 소유자 이름에는 영문 · 숫자 · . _ - 만 쓴다: $o"; return 1 }
   print -r -- $o

@@ -22,7 +22,8 @@
 #   vmq force-release <vm>              그 VM 을 잡은 차례를 지운다. 사용자가 지시할 때만 쓴다
 #   vmq list                            대상 목록(이름 · Mac · 역할)
 #   vmq peek-check '<명령 한 줄>'        차례 없이 실행해도 되는 읽기인지 판별한다(종료 코드 0 · 1)
-# 소유자는 VM_QUEUE_OWNER, 없으면 CLAUDE_CODE_SESSION_ID. 설명은 -l 또는 VM_QUEUE_LABEL.
+# 소유자는 VM_QUEUE_OWNER, 없으면 CLAUDE_CODE_SESSION_ID, 둘 다 없는 Doghoodie 탭이면 그 탭을 연 세션의 id(lib/vmq.zsh 의
+# vmq_owner_doghoodie). 설명은 -l 또는 VM_QUEUE_LABEL.
 # 차례 고정: VM_QUEUE_TICKET=<키>(vmq ticket 이 찍은 값)를 주면 mine · release(와 lib/vmq.zsh 의 vmq_require · vmq_keepalive · vmq_chain_of ·
 # vmq_chain_mark)는 그 키가 내 지금 차례일 때만 동작하고, 아니면 아무것도 하지 않고 stderr 에 고정한 키 · 지금 키를 쓰고 종료 코드 1.
 # 다른 명령은 이 값을 보지 않는다(run 은 지운 뒤 명령을 실행한다).

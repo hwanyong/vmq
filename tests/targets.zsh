@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Target list test: tests/targets.zsh <vmq path> <test folder>. The data folder is made in the test folder (VMQ_DATA).
-#   1 vmq paths: the data folder and target list follow VMQ_DATA; without VMQ_DATA, the host's default (lib/paths.zsh)
+#   1 vmq paths: the data folder and target list follow VMQ_DATA; without VMQ_DATA, the host's default (lib/paths.zsh); on
+#     Windows, --json gives Windows paths
 #   2 vmq target add before vmq init creates the list; vmq init leaves an existing list as it is
 #   3 refusals: a name that exists, a bad name, address, roles or operating system, too few values
 #   4 vmq target remove refuses a target a turn holds, removes it once released, and refuses a name not in the list
@@ -13,9 +14,18 @@ ok=0 bad=0
 check() { if eval "$2"; then print "right: $1"; (( ++ok )); else print "wrong: $1"; (( ++bad )); fi }
 rc() { "$@" >/dev/null 2>&1; print $? }
 
-check "1. paths follow VMQ_DATA" '[[ $($V paths --json | jq -r .registry) == $VMQ_DATA/resources.tsv ]]'
-if [[ $OSTYPE == darwin* ]]; then expected=$HOME/Library/Application\ Support/vmq; else expected=$D/xdg/vmq; fi
-check "1. without VMQ_DATA the default is $expected" '[[ $(env -u VMQ_DATA XDG_DATA_HOME=$D/xdg $V paths --json | jq -r .data) == $expected ]]'
+# The text output of vmq paths holds this shell's paths (MSYS paths on Windows)
+pathline() { local key=$1; shift; "$@" paths | awk -F'\t' -v k=$key '$1 == k { print $2 }' }
+check "1. paths follow VMQ_DATA" '[[ $(pathline registry $V) == $VMQ_DATA/resources.tsv ]]'
+if [[ $OSTYPE == darwin* ]]; then expected=$HOME/Library/Application\ Support/vmq
+elif [[ $OSTYPE == (cygwin|msys)* ]]; then expected=$(cygpath -u "$LOCALAPPDATA")/vmq
+else expected=$D/xdg/vmq; fi
+check "1. without VMQ_DATA the default is $expected" '[[ $(pathline data env -u VMQ_DATA XDG_DATA_HOME=$D/xdg $V) == $expected ]]'
+if [[ $OSTYPE == (cygwin|msys)* ]]; then
+  check "1. --json gives the Windows path" '[[ $($V paths --json | jq -r .registry) == "$(cygpath -w $VMQ_DATA/resources.tsv)" ]]'
+else
+  check "1. --json gives the same path" '[[ $($V paths --json | jq -r .registry) == $VMQ_DATA/resources.tsv ]]'
+fi
 
 check "2. add before init creates the list" '(( $(rc $V target add TestServer mac-a.local server,myproject macOS) == 0 )) && [[ -r $VMQ_DATA/resources.tsv ]]'
 check "2. init keeps an existing list" '$V init | grep -q "1 targets"'

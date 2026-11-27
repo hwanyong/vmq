@@ -21,7 +21,7 @@ waitheld() { local i; for i in {1..20}; do (( $(held) )) && return 0; sleep 0.5;
 export VM_QUEUE_DIR=$D/q1
 p=$(start sleep 60); waitheld; kill -TERM -$p; sleep 2
 check "1. 2 s after TERM to the group, F has no turn" '(( $(held) == 0 ))'
-pkill -g $p 2>/dev/null
+kill -KILL -- -$p 2>/dev/null
 
 export VM_QUEUE_DIR=$D/q2
 p=$(start sleep 5); waitheld; t=$EPOCHREALTIME; kill -TERM $p; sleep 1
@@ -29,7 +29,7 @@ check "2. 1 s after TERM to run alone, the command still runs and the turn is he
 for i in {1..24}; do (( $(held) )) || break; sleep 0.5; done
 e=$(( EPOCHREALTIME - t ))
 check "2. released after the command ends (over 4 s and within 12 s after TERM: $(printf %.1f $e) s)" '(( $(held) == 0 && e > 4 && e < 12 ))'
-pkill -g $p 2>/dev/null
+kill -KILL -- -$p 2>/dev/null
 
 export VM_QUEUE_DIR=$D/q3
 p=$(start sleep 60); waitheld; kill -KILL -$p; sleep 2
@@ -42,7 +42,7 @@ check "4. F waits while X holds" '(( $(waiting) >= 1 ))'
 kill -TERM -$p; sleep 2
 VM_QUEUE_OWNER=X $V release >/dev/null; sleep 1
 check "4. F's request, ended by TERM while waiting, is removed (not assigned, not waiting)" '(( $(held) == 0 && $(waiting) == 0 )) && ! $V status 2>/dev/null | grep -q "assigned to F"'
-pkill -g $p 2>/dev/null
+kill -KILL -- -$p 2>/dev/null
 
 print "right $ok, wrong $bad"
 rm -rf $D

@@ -1,6 +1,6 @@
 {
   "name": "vmq",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A control queue for VMs, devices and screens that several Claude Code sessions share: take a turn before you touch a target, and see the queue in a pane",
   "author": {
     "name": "hwanyong"

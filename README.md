@@ -15,8 +15,9 @@ The plugin has four parts:
 
 ## Requirements
 
-- macOS or Linux. On Windows, run Claude Code inside WSL2 (a Linux host). Native Windows is not supported
-- zsh, `jq`, and on Linux `procps` (`ps`, `pkill`). `nc` is used for `hosts.tsv` when present
+- macOS, Linux, Windows inside WSL2 (a Linux host), or native Windows with Git Bash (Git for Windows). WSL 1 is refused: its file locks do not keep other processes out (convert with `wsl --set-version <distribution> 2`)
+- zsh, `jq`, and on Linux `procps` (`ps`, `pkill`). `nc` is used for `hosts.tsv` when present. You do not install these
+  yourself: `vmq-setup` does it, and Claude runs it ("Setup")
 - Claude Code with plugin hooks modules (mods) and plugin `bin/` on the Bash tool's PATH. Tested with 2.1.332
 
 ## Install
@@ -34,6 +35,27 @@ or from a shell:
 claude plugin marketplace add hwanyong/vmq
 claude plugin install vmq@vmq --scope user
 ```
+
+## Setup
+
+After installing, start a new Claude Code session. When something vmq needs is missing, the status line says `vmq: setup needed (…). Run /vmq-setup`. Run `/vmq-setup`, or ask Claude to set up vmq: the skill `vmq:queue` has Claude run `vmq-setup --check` and then `vmq-setup`, which installs only what is missing and prints each step.
+
+| Host | What `vmq-setup` installs | What you may have to do |
+|---|---|---|
+| macOS | `jq` with Homebrew (zsh ships with macOS) | Install Homebrew if it is missing |
+| Linux, WSL2 | `zsh`, `jq`, `procps` with the distribution's package manager | When sudo asks for a password, run the `sudo …` line it prints, typed after `!` in Claude Code |
+| Windows with Git Bash | The MSYS2 `zsh` package and the DLLs it needs, checked against the SHA-256 in the MSYS2 package index, and the MSYS2 `jq` package (a native Windows `jq.exe` writes CRLF line ends), copied into Git's `usr` folder without replacing Git's files | When Git is installed for all users, accept the one administrator prompt (UAC) |
+| Windows without Git Bash | Git for Windows with winget, for this user first (`bin/vmq-setup.ps1`, which Claude runs with its PowerShell tool), then the row above | Restart Claude Code so its Bash tool uses Git Bash |
+
+Claude Code on Windows uses Git Bash for its Bash tool when Git for Windows is installed, and only a PowerShell tool when it is not ([setup docs](https://code.claude.com/docs/en/setup.md)). vmq runs in Git Bash.
+
+The first time `vmq-main` opens, Claude Code must trust its working folder, the data folder. Trust is given by you at Claude Code's trust prompt, so Claude cannot give it. Run once in a terminal, accept the prompt, and quit:
+
+```sh
+cd "$(vmq paths | awk -F'\t' '$1 == "data" { print $2 }')" && claude
+```
+
+`vmq paths` prints the data folder (on macOS `~/Library/Application Support/vmq`). Until then, `vmq-main` does not open, and the mod shows that failure once, not in every session.
 
 Then list the targets your sessions share ("Targets" below). Either ask Claude in words ("add my test VMs TestServer and TestClient on this Mac, roles server and client"), and the skill `vmq:queue` runs the commands for you, or run them yourself:
 
@@ -108,6 +130,7 @@ The CLI and library read these. For the mod, which runs `bin/vmq` from inside Cl
 | `VM_QUEUE_LABEL` | none | Label of a turn, same as `-l` |
 | `VM_QUEUE_TICKET` | none | Pins `vmq_require`, `vmq release` and the others to one turn key (`vmq ticket`) |
 | `VM_QUEUE_INTERNAL` | none | `1` skips the check, for a tool that runs itself again on another Mac |
+| `VMQ_LOCK_WAIT` | 120 | Seconds a command waits for the queue lock before it gives up (exit code 1) |
 | `VMQ_SSH_RETRY_S` | 30 | Seconds `vmq_ssh` keeps retrying connections that end in the banner exchange |
 | `VMQ_REQUIRED_REF` | `main` | Branch `.vmq-required` is read from ("Rules") |
 
@@ -126,6 +149,7 @@ The CLI and library read these. For the mod, which runs `bin/vmq` from inside Cl
 | `vmq paths [--json]` | Where this host keeps the data folder, target list, queue and cache |
 | `vmq peek-check '<command line>'` | Whether a read may run without a turn |
 | `/vmq` · `/vmq-main` | Opens the pane · opens the `vmq-main` session |
+| `vmq-setup [--check]` · `/vmq-setup` | Checks and installs what vmq needs ("Setup") · asks Claude to run it |
 
 A group is a target name, comma-separated candidates (`Server1,Server2`), a role (`@server`), or targets joined with `+` that are taken together (`Server2+Client2`). `@server+@client` takes a server and a client on the same Mac. Exit codes: 0 done, 1 refused or error, 2 usage, 75 waiting.
 
@@ -154,7 +178,7 @@ vmq_require TestServer || exit 1
 | Turn | Commands that change a target (start, stop, snapshot, restore, install, drive the screen, capture the screen, run tests) run only for the owner that holds its turn. The project tool calls `vmq_require <target>…` before each and exits 1 when refused |
 | Request | One request per owner. Each group gets one target; the candidate free first is given; a `+` candidate is given when all its targets are free. All targets are taken at once, so nobody holds one and waits for another (no deadlock). To get more after taking, release and acquire together. While waiting, `acquire` with other groups changes the request under the same sequence number |
 | Assignment | Waiting turns are read in sequence order and each group gets a free candidate. A turn that cannot be filled is skipped, so later turns can use free targets. A turn waiting longer than `VM_QUEUE_STARVE` reserves the free targets among its candidates |
-| Expiry | A turn idle for `VM_QUEUE_LEASE` seconds is removed. `vmq_require` writes the calling shell's PID and start time into the turn; while that process lives the turn is kept, up to `VM_QUEUE_HOLD_MAX` seconds after its last control command or `vmq_keepalive`. Start times are read with `LC_ALL=C TZ=UTC`, so a reused PID is not taken as alive |
+| Expiry | A turn idle for `VM_QUEUE_LEASE` seconds is removed. On Windows (Git Bash) a process is told apart by its process group and session in place of its start time, because Cygwin sets the start time again on exec. `vmq_require` writes the calling shell's PID and start time into the turn; while that process lives the turn is kept, up to `VM_QUEUE_HOLD_MAX` seconds after its last control command or `vmq_keepalive`. Start times are read with `LC_ALL=C TZ=UTC`, so a reused PID is not taken as alive |
 | Ended chains | A chain is a shell that takes a turn once, drives targets and ends; `vmq_chain_mark <pid> <target>…` writes it into the turn. A turn whose chain ended is not handed even to the same owner's next `acquire` until its cleanup releases it or it expires, so the cleanup never acts on the next chain's targets |
 | Pinning | With `VM_QUEUE_TICKET=<key>`, `vmq_require`, `vmq_keepalive`, `vmq_chain_of`, `vmq_chain_mark`, `vmq release` and `vmq mine` act only on that turn, so a cleanup cannot act on a newer turn of the same owner |
 | Tool version | When the calling script is in a git work tree whose `main` has `.vmq-required` (lines `<commit>\t<paths>\t<note>`), `vmq_require` refuses unless HEAD contains each commit or those paths equal `main`. An old work tree's tool then cannot drive targets without a fix that landed on `main` |
@@ -213,6 +237,8 @@ The first read after the mod loads only fills the list. After that, new verdicts
 `vmq-main` is one background session that watches the queue. The queue works without it. It writes reservations, tells a project's main session about turns that break them, warns about turns about to expire, and force-releases turns whose holding process is gone. Its role is `VMQ-MAIN.md`, which the mod adds to the system prompt of the session named `vmq-main` on every request, so it survives `/clear` and compaction.
 
 It opens automatically (`autoStartMain`), with `/vmq-main`, or with `vmq-main` in a shell. `bin/vmq-main` checks for a live `vmq-main` under a lock, so sessions starting together open one. It opens with name `vmq-main` (other sessions send to it by name), permission mode `bypassPermissions` (messages from sessions in another mode would wait for approval) and working folder `$VMQ_DATA`. If a second session gets the same name, the later one gets a warning in place of the role.
+
+When the data folder is not trusted yet, `claude --bg` refuses it and `bin/vmq-main` writes one stderr line with the folder and the command to run ("Setup"). The mod keeps the last such line in `$VMQ_CACHE/vmq-main-failed.txt` and shows a toast only when the line is new, so the same failure is not shown in every session.
 
 ## Tests
 

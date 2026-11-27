@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, StateWrite } from 'claude-code'
 
-import type { DataPaths, Flag, Row, Snapshot } from '../types'
+import type { DataPaths, Flag, Row, Shell, Snapshot } from '../types'
 import { buildSnapshot, countOf, flagEntries, parseAgents, roleOf } from './model'
 import { fillSlot, offerChoice, placementIn, readPlacement } from './pane-grid'
 
@@ -23,8 +23,11 @@ const EMPTY: Snapshot = { at: 0, targets: 0, rows: [], ended: [], badLines: 0, f
 // When the fields of Snapshot change, change shape. Values a former version stored stay across a reload.
 const snapshot = atom({ plugin: 'vmq', key: 'snapshot' } as const, EMPTY, { shape: 'snapshot-5' })
 // Empty strings until the first read of `vmq paths --json` in this session.
-const NO_PATHS: DataPaths = { rules: '', cache: '' }
-const dataPaths = atom({ plugin: 'vmq', key: 'paths' } as const, NO_PATHS, { shape: 'paths-1' })
+const NO_PATHS: DataPaths = { rules: '', cache: '', mainFailed: '' }
+const dataPaths = atom({ plugin: 'vmq', key: 'paths' } as const, NO_PATHS, { shape: 'paths-2' })
+const shell = atom({ plugin: 'vmq', key: 'shell' } as const, { isKnown: false, argv: [] } as Shell, { shape: 'shell-1' })
+// Asks the model to install what vmq needs (/vmq-setup, and the status line while something is missing).
+const SETUP_PROMPT = 'Set up vmq on this host: follow the Setup section of the skill vmq:queue (run vmq-setup --check, then vmq-setup), and tell me what it installed or what I must do.'
 
 type Resolvable = Parameters<EngineInterface['ui']['resolve']>[0]
 type Raw = { status: string; agents: string }
@@ -33,6 +36,7 @@ type Options = { autoStartMain?: boolean }
 // The CLI ships in this plugin (bin/ is also on the Bash tool's PATH).
 const filesOf = ($: EngineInterface) => ({
   vmq: `${$.plugin.root}/bin/vmq`,
+  setup: `${$.plugin.root}/bin/vmq-setup`,
   main: `${$.plugin.root}/bin/vmq-main`,
   role: `${$.plugin.root}/VMQ-MAIN.md`,
 })
@@ -61,6 +65,32 @@ const readCache = async ($: EngineInterface, path: string): Promise<Raw | undefi
   return parseRaw(await $.fs.read(path))
 }
 
+// On Windows (OS is Windows_NT) the scripts run through Git Bash. Its bash.exe is CLAUDE_CODE_GIT_BASH_PATH when set (the
+// variable Claude Code itself reads), else <Git>\bin\bash.exe, <Git> being three folders above `git --exec-path`
+// (<Git>/ucrt64/libexec/git-core or <Git>/mingw64/libexec/git-core). bin\bash.exe puts Git's usr\bin on PATH, where
+// vmq-setup installs zsh and jq.
+const shellOf = async ($: EngineInterface): Promise<string[]> => {
+  const known = await read($, shell)
+  if (known.isKnown) return known.argv
+  let argv: string[] = []
+  if ((await $.env.get('OS')) == 'Windows_NT') {
+    const set = await $.env.get('CLAUDE_CODE_GIT_BASH_PATH')
+    // Without git there is no Git Bash: the status line then names what vmq-setup.ps1 installs
+    const exec = set ? '' : await run($, ['git', '--exec-path']).catch(() => { throw new Error('Git for Windows (Git Bash)') })
+    const bash = set || `${exec.trim().split(/[\\/]/).slice(0, -3).join('/')}/bin/bash.exe`
+    argv = [bash, '-c', 'exec "$0" "$@"']
+  }
+  await update($, shell, () => ({ isKnown: true, argv }))
+  return argv
+}
+
+// A script of this plugin as a command line: [<shell…>, <script>, <arguments…>]. Git Bash takes C:/… paths, so the
+// separators are made forward slashes.
+const scriptArgv = async ($: EngineInterface, script: string, args: string[]) => {
+  const prefix = await shellOf($)
+  return [...prefix, prefix.length > 0 ? script.replace(/\\/g, '/') : script, ...args]
+}
+
 const run = async ($: EngineInterface, argv: string[], timeoutMs = RUN_MS): Promise<string> => {
   const { exitCode, stdout, stderr } = await $.process.run(argv, { timeoutMs })
   if (exitCode != 0) throw new Error(`${argv.slice(-3).join(' ')} exit code ${exitCode}: ${firstLine(stderr)}`)
@@ -72,8 +102,8 @@ const run = async ($: EngineInterface, argv: string[], timeoutMs = RUN_MS): Prom
 const dataPathsOf = async ($: EngineInterface): Promise<DataPaths> => {
   const known = await read($, dataPaths)
   if (known.cache != '') return known
-  const out = JSON.parse(await run($, [filesOf($).vmq, 'paths', '--json'])) as { data: string; cache: string }
-  const found = { rules: `${out.data}/reservations.tsv`, cache: `${out.cache}/status.json` }
+  const out = JSON.parse(await run($, await scriptArgv($, filesOf($).vmq, ['paths', '--json']))) as { data: string; cache: string }
+  const found = { rules: `${out.data}/reservations.tsv`, cache: `${out.cache}/status.json`, mainFailed: `${out.cache}/vmq-main-failed.txt` }
   await update($, dataPaths, () => found)
   return found
 }
@@ -82,7 +112,7 @@ const readRaw = async ($: EngineInterface): Promise<Raw> => {
   const paths = await dataPathsOf($)
   const cached = await readCache($, paths.cache)
   if (cached) return cached
-  const status = await run($, [filesOf($).vmq, 'status', '--json'])
+  const status = await run($, await scriptArgv($, filesOf($).vmq, ['status', '--json']))
   const agents = await run($, ['claude', 'agents', '--json', '--all'])
   await $.fs.write(paths.cache, JSON.stringify({ status, agents }))
   return { status, agents }
@@ -135,13 +165,27 @@ const ownPid = async ($: EngineInterface) => {
 }
 
 // Whether this read succeeded at least once since the module loaded. register makes a new one on each load.
-type Polling = { hasSucceeded: boolean }
+type Polling = { hasSucceeded: boolean; isSetUp: boolean }
+
+// What vmq-setup --check reports missing on this host, one line; empty when nothing is missing.
+const missingOf = async ($: EngineInterface) => {
+  const { exitCode, stdout, stderr } = await $.process.run(await scriptArgv($, filesOf($).setup, ['--check']), { timeoutMs: RUN_MS })
+  if (exitCode == 0) return ''
+  const lines = stdout.split('\n').filter(line => line.startsWith('missing: ')).map(line => line.slice('missing: '.length))
+  return lines.length > 0 ? lines.join(', ') : firstLine(stderr) || `vmq-setup --check exit code ${exitCode}`
+}
 
 // Reads, updates snapshot, shows a toast for new verdicts, and in vmq-main hands them to the model.
 // The first successful read after the module loads only fills snapshot.flagged with its verdict keys and shows no toast or
 // prompt. snapshot in $.state outlasts a reload and is empty in a new session, so to keep from announcing verdicts that were
 // already there it counts per module load. A failed read does not count as a success.
+// Until vmq-setup --check passes, each poll checks again and the status line says what is missing instead of a read failure.
 const poll = async ($: EngineInterface, polling: Polling) => {
+  if (!polling.isSetUp) {
+    const missing = await missingOf($).catch((error: unknown) => error instanceof Error ? error.message : String(error))
+    if (missing != '') return $.ui.status(oneLine(`vmq: setup needed (${missing}). Run /vmq-setup`))
+    polling.isSetUp = true
+  }
   const at = await $.clock.now()
   const previous = await read($, snapshot)
   const paths = await dataPathsOf($).catch(() => NO_PATHS)
@@ -176,8 +220,15 @@ const startMain = async ($: EngineInterface) => {
   if ((JSON.parse(raw.status) as { targets: unknown[] }).targets.length == 0) return
   const agents = parseAgents(raw.agents)
   if (agents.some(one => one.name == CONTROL_SESSION && one.pid != null)) return
-  const { exitCode, stderr } = await $.process.run([filesOf($).main, '--if-absent'], { timeoutMs: START_MS })
-  if (exitCode != 0) $.ui.toast(oneLine(`vmq: could not start vmq-main: ${firstLine(stderr)}`), { timeoutMs: 8000 })
+  const { exitCode, stderr } = await $.process.run(await scriptArgv($, filesOf($).main, ['--if-absent']), { timeoutMs: START_MS })
+  // A failure is shown once: the line is kept in mainFailed, and the same line in a later session shows nothing. A start that
+  // works empties the file, so a later failure is shown again.
+  const { mainFailed } = await dataPathsOf($)
+  const line = exitCode == 0 ? '' : firstLine(stderr) || `exit code ${exitCode}`
+  const shown = (await $.fs.exists(mainFailed)) ? (await $.fs.read(mainFailed)).trim() : ''
+  if (line == shown) return
+  await $.fs.write(mainFailed, line)
+  if (line != '') $.ui.toast(oneLine(`vmq: could not start vmq-main: ${line}`), { timeoutMs: 12000 })
 }
 
 // The vmq-main role, added to the system prompt of the session named vmq-main: VMQ-MAIN.md, or a warning when an earlier live
@@ -295,8 +346,9 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'vmq', description: 'Show the vmq queue with sessions, projects and reservation verdicts in a pane' })
     await $.command.register({ name: 'vmq-main', description: 'Open the vmq-main session in the background (one at most)' })
+    await $.command.register({ name: 'vmq-setup', description: 'Ask Claude to install what vmq needs on this host (zsh, jq)' })
     // The first read runs on a timer too: using $ after session.start's dispatch ends could be cut off with it.
-    const polling: Polling = { hasSucceeded: false }
+    const polling: Polling = { hasSucceeded: false, isSetUp: false }
     $.clock.after(1, () => { void poll($, polling) })
     $.clock.every(POLL_MS, () => { void poll($, polling) })
     if (autoStartMain) $.clock.after(1, () => { void startMain($).catch(() => undefined) })
@@ -311,8 +363,13 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'vmq-main' }, async $ => {
-    const { exitCode, stdout, stderr } = await $.process.run([filesOf($).main], { timeoutMs: START_MS })
+    const { exitCode, stdout, stderr } = await $.process.run(await scriptArgv($, filesOf($).main, []), { timeoutMs: START_MS })
     return { text: exitCode == 0 ? `Opened vmq-main: ${firstLine(stdout)}` : oneLine(stderr.trim()) }
+  })
+
+  on('command.run', { command: 'vmq-setup' }, async $ => {
+    void $.prompt.submit({ text: SETUP_PROMPT })
+    return { text: 'Asked Claude to set up vmq.' }
   })
 
   on('prompt.compose', async ($, e, next) => {

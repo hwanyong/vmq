@@ -6,20 +6,21 @@
 # id, pid, status and cwd to stderr and exits 1; with --if-absent it exits 0 and prints nothing (the vmq mod starts it this way).
 # Otherwise it opens a background session in the vmq data folder ($VMQ_DATA, lib/paths.zsh),
 # prints claude --bg's output (the session id) and waits until the session is listed.
-# Several sessions can start at once and each run this. The check and the open happen under one lock ($VMQ_DATA/.vmq-main.lock,
-# a directory: mkdir is atomic on a local disk), held until the new session is listed, so only one session is opened. A lock
-# older than 60 seconds is taken as left by an ended process.
+# Several sessions can start at once and each run this. The check and the open happen under one lock ($VMQ_DATA/.vmq-main.flock,
+# an fcntl lock taken with zsystem flock), held until the new session is listed, so only one session is opened. The kernel
+# releases it when this process ends.
 # The role text is not given here: the vmq mod adds VMQ-MAIN.md to the system prompt of the session named vmq-main
 # (hooks/register.tsx), so it stays after /clear and compact.
 # Exit codes: 0 opened (or already open with --if-absent), 1 already open, lock not obtained, or claude or jq failed.
 set -uo pipefail
+setopt extendedglob
 zmodload zsh/datetime
-zmodload -F zsh/stat b:zstat
+zmodload zsh/system
 
 readonly name=vmq-main
 source "${0:A:h:h}/lib/paths.zsh"
 readonly data=$VMQ_DATA
-readonly lock=$data/.vmq-main.lock
+readonly lock=$data/.vmq-main.flock
 if_absent=0; [[ ${1:-} == --if-absent ]] && if_absent=1
 
 # Live sessions named vmq-main, one line each, or nothing
@@ -32,14 +33,9 @@ running() {
 }
 
 mkdir -p "$data" || exit 1
-i=0
-until mkdir "$lock" 2>/dev/null; do
-  if (( EPOCHSECONDS - $(zstat +mtime -- "$lock" 2>/dev/null || print $EPOCHSECONDS) > 60 )); then rmdir "$lock" 2>/dev/null; continue; fi
-  sleep 0.2
-  (( ++i < 300 )) || { print -u2 -- "vmq-main: could not get the lock ($lock)"; exit 1 }
-done
-# exit inside `{ } always { }` does not run the always block in zsh, so the lock is released by an EXIT trap
-trap 'rmdir "$lock" 2>/dev/null' EXIT
+[[ -e $lock ]] || : >> "$lock" || exit 1
+# The kernel releases this fcntl lock when this process ends, on every exit path
+zsystem flock -t 60 -f lock_fd "$lock" || { print -u2 -- "vmq-main: could not get the lock in 60 s ($lock)"; exit 1 }
 found=$(running) || exit 1
 if [[ -n $found ]]; then
   (( if_absent )) && exit 0
@@ -48,9 +44,19 @@ if [[ -n $found ]]; then
   exit 1
 fi
 cd "$data" || exit 1
-claude --bg -n $name --permission-mode bypassPermissions \
-  "Follow the \"On start\" section of the vmq-main role in your system prompt. If your system prompt has no vmq-main role section, the vmq plugin is not loaded: do not take the role, and tell the user." \
-  || { print -u2 -- "vmq-main: claude --bg failed"; exit 1 }
+# claude --bg refuses a folder Claude Code has not been told to trust ("Workspace not trusted. Run `claude` in <folder> once and
+# accept the trust prompt, then retry."). Trust is given by a person at that prompt, so the stderr line names the folder and
+# the command for the user.
+if ! out=$(claude --bg -n $name --permission-mode bypassPermissions \
+  "Follow the \"On start\" section of the vmq-main role in your system prompt. If your system prompt has no vmq-main role section, the vmq plugin is not loaded: do not take the role, and tell the user." 2>&1); then
+  if [[ $out == *(#i)not\ trusted* ]]; then
+    print -u2 -r -- "vmq-main: Claude Code does not trust $data yet. Run once in a terminal: cd \"$data\" && claude (accept the trust prompt, then quit), then /vmq-main"
+  else
+    print -u2 -r -- "vmq-main: claude --bg failed: ${${out%%$'\n'*}:-no output}"
+  fi
+  exit 1
+fi
+print -r -- "$out"
 # Hold the lock until the new session is listed, so a run started meanwhile sees it
 for i in {1..60}; do
   [[ -n $(running 2>/dev/null) ]] && exit 0

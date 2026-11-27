@@ -17,17 +17,25 @@ check() { if [[ $3 == $2 ]]; then print "right: $1"; (( pass++ )); else print "w
 # (1) (2) concurrent runs
 for i in {1..9}; do
   if (( i % 3 == 0 )); then spec=(@server); else spec=(@server+@client); fi
-  VM_QUEUE_OWNER=P$i $V run $spec -- zsh -c 'zmodload zsh/datetime; print "GRANT $0 $VM_QUEUE_GRANTED" >> '$out'; for v in ${=VM_QUEUE_GRANTED}; do print "$v B $EPOCHREALTIME $0" >> '$out'; done; sleep 0.4; for v in ${=VM_QUEUE_GRANTED}; do print "$v E $EPOCHREALTIME $0" >> '$out'; done' P$i 2>/dev/null &
+  VM_QUEUE_OWNER=P$i $V run $spec -- zsh -c 'zmodload zsh/datetime; print "GRANT $0 $VM_QUEUE_GRANTED" >> '$out'; for v in ${=VM_QUEUE_GRANTED}; do print "$v B $EPOCHREALTIME $0" >> '$out'; done; sleep 0.4; for v in ${=VM_QUEUE_GRANTED}; do print "$v E $EPOCHREALTIME $0" >> '$out'; done' P$i 2>$T/err.P$i &
 done
 wait
+
 for v in S1 C1 S2 C2; do
   m=$(grep "^$v " $out | sort -k3 -n | awk 'BEGIN{d=0;m=0} $2=="B"{d++; if(d>m)m=d} $2=="E"{d--} END{print m}')
-  check "(1) $v at most 1 at once ($(grep -c "^$v B" $out) intervals)" 1 $m
+  check "(1) $v at most 1 at once ($(grep -c "^$v B" $out) intervals, most at once $m)" 1 $(( m <= 1 ))
 done
 pairs=$(grep '^GRANT' $out | awk '{print $2, $3, $4}' | grep -v -E '^P(3|6|9) ')
 mixed=$(print -r -- $pairs | awk '{ if (substr($2,2) != substr($3,2) || substr($2,1,1) != "S" || substr($3,1,1) != "C") print }' | grep -c .)
 check "(2) all six pair requests were granted" 6 $(print -r -- $pairs | grep -c .)
+# A run that did not run its command: print its stderr, so a failure shows why
+for i in {1..9}; do grep -q "^GRANT P$i " $out || { print "  P$i ran no command; its stderr:"; sed 's/^/    /' $T/err.P$i }; done
 check "(2) mixed pairs (different Macs, first not a server, second not a client)" 0 $mixed
+
+# Every run has ended, so the queue must be empty here. When it is not, print it: the checks below would fail on it
+left=$($V status 2>&1 | grep -E 'held by|waiting [0-9]|assigned to')
+check "(2) the queue is empty after all runs ended (no turn left behind)" "" "$left"
+[[ -z $left ]] || { print "queue after all runs ended (expected empty):"; $V status 2>&1 | sed 's/^/  /'; tail -20 $VM_QUEUE_DIR/log | sed 's/^/  log: /' }
 
 # (3) (4) taking pairs in turn
 VM_QUEUE_OWNER=A $V acquire -w 5 S1+C1 >/dev/null; check "(3) A takes S1+C1" 0 $?

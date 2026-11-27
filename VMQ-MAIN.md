@@ -8,7 +8,7 @@ The queue runs without this session. Sessions and the `vmq` command take, releas
 
 The vmq mod opens it when a session starts and none is live (option `autoStartMain`, on by default). By hand: `/vmq-main`, or `vmq-main` in a shell (the plugin's `bin/` is on the Bash tool's PATH).
 
-`bin/vmq-main` checks `claude agents --json` under a lock (`$VMQ_DATA/.vmq-main.lock`), so sessions that start together open one. When a live session named `vmq-main` exists it opens none.
+`bin/vmq-main` checks `claude agents --json` under a lock (`$VMQ_DATA/.vmq-main.flock`, an fcntl lock), so sessions that start together open one. When a live session named `vmq-main` exists it opens none.
 
 | Value | Set to | When it differs |
 |---|---|---|

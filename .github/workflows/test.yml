@@ -17,15 +17,18 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Install zsh and jq
-        if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -y -q zsh jq
+      - name: Setup check before installing
+        run: bin/vmq-setup --check || true
+      - name: Install with vmq-setup
+        run: bin/vmq-setup
       - name: Syntax
         run: for f in bin/vmq bin/vmq-main bin/vmq-ssh-e lib/*.zsh tests/*.zsh; do zsh -n "$f" || exit 1; done
       - name: Read check (tests/peek.zsh)
         run: zsh tests/peek.zsh
       - name: Target list (tests/targets.zsh)
         run: zsh tests/targets.zsh bin/vmq "$RUNNER_TEMP/targets"
+      - name: Queue lock (tests/lock.zsh)
+        run: zsh tests/lock.zsh bin/vmq "$RUNNER_TEMP/lock"
       - name: Owners at once (tests/stress.zsh)
         run: zsh tests/stress.zsh bin/vmq "$RUNNER_TEMP/stress" "$RUNNER_TEMP/stress.out"
       - name: Server and client pairs (tests/pair.zsh)
@@ -34,3 +37,74 @@ jobs:
         run: zsh tests/keepalive.zsh bin/vmq "$RUNNER_TEMP/keepalive"
       - name: vmq run and signals (tests/run-signal.zsh)
         run: zsh tests/run-signal.zsh bin/vmq "$RUNNER_TEMP/run-signal"
+
+  # Native Windows: Git Bash on the runner. The runner's own jq (Chocolatey) and zstd (C:\tools\zstd) are taken off PATH, so
+  # vmq-setup runs the paths a user's Windows takes: zstd.exe downloaded, zsh and its DLLs from MSYS2, jq.exe from its release.
+  git-bash:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell start finds Git Bash (bin/vmq-setup.ps1 -Check)
+        shell: pwsh
+        run: |
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch 'Chocolatey|\\tools\\zstd' }) -join ';'
+          ./bin/vmq-setup.ps1 -Check; "exit code $LASTEXITCODE (1 expected: zsh and jq missing)"; exit 0
+      - name: Install with vmq-setup
+        run: |
+          export PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -i -e chocolatey -e /tools/zstd | paste -sd:)
+          command -v jq zstd zsh || true
+          bin/vmq-setup
+          bin/vmq-setup --check
+      - name: Git's files are untouched (a second run copies nothing)
+        run: bin/vmq-setup && ls -la /usr/bin/zsh.exe /usr/bin/jq.exe && zsh -c 'print $OSTYPE $ZSH_VERSION'
+      - name: Syntax
+        run: for f in bin/vmq bin/vmq-main bin/vmq-ssh-e lib/*.zsh tests/*.zsh; do zsh -n "$f" || exit 1; done
+      - name: vmq paths --json gives Windows paths
+        run: bin/vmq paths && bin/vmq paths --json
+      - name: Read check (tests/peek.zsh)
+        run: zsh tests/peek.zsh
+      - name: Target list (tests/targets.zsh)
+        run: zsh tests/targets.zsh bin/vmq "$(cygpath -u "$RUNNER_TEMP")/targets"
+      - name: Queue lock (tests/lock.zsh)
+        run: zsh tests/lock.zsh bin/vmq "$(cygpath -u "$RUNNER_TEMP")/lock"
+      - name: Owners at once (tests/stress.zsh)
+        run: zsh tests/stress.zsh bin/vmq "$(cygpath -u "$RUNNER_TEMP")/stress" "$(cygpath -u "$RUNNER_TEMP")/stress.out"
+      - name: Server and client pairs (tests/pair.zsh)
+        run: zsh tests/pair.zsh bin/vmq "$(cygpath -u "$RUNNER_TEMP")/pair"
+      - name: Holding process and expiry (tests/keepalive.zsh)
+        run: zsh tests/keepalive.zsh bin/vmq "$(cygpath -u "$RUNNER_TEMP")/keepalive"
+      - name: vmq run and signals (tests/run-signal.zsh)
+        run: zsh tests/run-signal.zsh bin/vmq "$(cygpath -u "$RUNNER_TEMP")/run-signal"
+
+  # Windows with WSL: Ubuntu in WSL, set up by vmq-setup as root (apt-get), the checkout under /mnt like a Windows folder.
+  # GitHub-hosted Windows runners did not start a WSL 2 VM (the distribution install ran 30 min without finishing, run
+  # 46016202831), so this job uses WSL 1. WSL 2 runs a Linux kernel, which the ubuntu-latest job covers.
+  wsl:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: wsl-bash {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Vampire/setup-wsl@v5
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 1
+      # GitHub-hosted runners cannot start WSL 2, so this job runs WSL 1, which vmq refuses (its file locks do not keep other
+      # processes out). It checks that refusal and the parts that need no lock. WSL 2 runs a Linux kernel, like the ubuntu job.
+      - name: Install with vmq-setup
+        run: cat /proc/sys/kernel/osrelease; bin/vmq-setup || true
+      - name: WSL 1 is refused
+        run: |
+          set -e
+          out=$(bin/vmq-setup --check || true); echo "$out"; echo "$out" | grep -q 'missing: WSL 2'
+          printf 'T1\t127.0.0.1\t-\n' > /tmp/r.tsv
+          if VMQ_REGISTRY=/tmp/r.tsv VM_QUEUE_DIR=/tmp/q bin/vmq status 2>/tmp/err; then echo "vmq status ran on WSL 1"; exit 1; fi
+          cat /tmp/err; grep -q 'WSL 1 is not supported' /tmp/err
+      - name: Tests that take no lock
+        run: zsh tests/peek.zsh

@@ -1,6 +1,6 @@
 ---
 name: queue
-description: Take a vmq turn before driving a VM, device, simulator, desktop app window or browser profile that other Claude Code sessions may also drive, and release it when done. Use before any control command on such a target (clicks, key presses, snapshot restore, install, reboot, screen capture), when handing such work to a subagent or another session, when a vmq command or vmq_require refuses or exits 75, and when the user asks to add, register, list or remove a target (VM, device, desktop, build slot) for vmq.
+description: Take a vmq turn before driving a VM, device, simulator, desktop app window or browser profile that other Claude Code sessions may also drive, and release it when done. Use before any control command on such a target (clicks, key presses, snapshot restore, install, reboot, screen capture), when handing such work to a subagent or another session, when a vmq command or vmq_require refuses or exits 75, when the user asks to add, register, list or remove a target (VM, device, desktop, build slot) for vmq, and when vmq cannot run on this host (`vmq: command not found`, `zsh: command not found` or `bad interpreter` for vmq, jq missing, the status line says `vmq: setup needed`, or the user asks to install or set up vmq).
 ---
 
 # vmq: take a turn before you drive a shared target
@@ -8,6 +8,20 @@ description: Take a vmq turn before driving a VM, device, simulator, desktop app
 When several sessions drive the same VM or device, one session's clicks, key presses or snapshot restores break another session's test. vmq is a queue: a session takes a turn on a target, drives it, and releases it. A target is listed in the target list (`vmq list`; `vmq paths` prints where vmq keeps its files).
 
 The commands are `vmq` (on the Bash tool's PATH while this plugin is enabled; also `${CLAUDE_PLUGIN_ROOT}/bin/vmq`) and the shell library `${CLAUDE_PLUGIN_ROOT}/lib/vmq.zsh`. The owner of a turn is this session (`CLAUDE_CODE_SESSION_ID`).
+
+## Setup
+
+vmq needs zsh (with the modules zsh/datetime, zsh/stat, zsh/net/tcp), jq and ps. `vmq-setup` (`${CLAUDE_PLUGIN_ROOT}/bin/vmq-setup`, a bash script on the Bash tool's PATH) checks them and installs what is missing. Do this yourself when vmq cannot run, when the status line says `vmq: setup needed`, or when the user asks to set up vmq; do not hand the steps to the user unless a step below says so.
+
+1. Run `vmq-setup --check`. Exit code 0 means nothing is missing: stop. Otherwise it prints one `missing: …` line each.
+2. Tell the user in one line what is missing and what you will install, then run `vmq-setup`. It prints each step.
+   - macOS: `brew install jq` (zsh ships with macOS). Without Homebrew it prints where to get it; tell the user.
+   - Linux and WSL2: the distribution's package manager installs zsh, jq and procps. As root or with sudo that needs no password it installs; otherwise it prints the `sudo …` command, and the user runs it by typing it after `!` in Claude Code (it asks for their password).
+   - Windows with Git Bash: it downloads the MSYS2 zsh package and the DLLs zsh needs, checks each against the SHA-256 in the MSYS2 package index, also takes jq from MSYS2 (a native Windows jq.exe writes CRLF line ends, which breaks vmq), and copies them into Git's `usr` folder without replacing any of Git's files. When Git is installed for all users, Windows asks once for administrator rights (UAC): tell the user to expect that prompt and accept it.
+3. Run `vmq-setup --check` again and report the result. When it is 0, `vmq list` (or `vmq init`) works; when no target is listed yet, offer to add targets ("Adding and removing targets").
+4. The first time `vmq-main` opens, Claude Code must trust the data folder, its working folder. Only the user can accept that trust prompt; do not edit `~/.claude.json` to give it. When `vmq-main` reports `does not trust`, give the user the command it printed, and tell them to run it once in a terminal, accept the prompt, quit, and then run `/vmq-main`. The data folder is the `data` line of `vmq paths`.
+
+On Windows without Git for Windows, Claude Code has only its PowerShell tool and no Bash tool. Then run, with the PowerShell tool, `powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}\bin\vmq-setup.ps1" -Check` and then without `-Check`. It installs Git for Windows with winget (for this user first) and runs `vmq-setup` in its Git Bash. Then tell the user to restart Claude Code, so the Bash tool uses Git Bash.
 
 ## Rules
 

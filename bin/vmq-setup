@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# vmq-setup [--check]: checks the programs vmq needs on this host and installs the missing ones.
+# vmq itself is zsh, so this file is bash (macOS ships bash 3.2, so it keeps to what 3.2 runs) and runs before zsh exists.
+#   --check   installs nothing: prints one `missing: <what>` line per missing program, exit code 1 when any is missing
+# Exit codes: 0 everything is there (after installing, when not --check), 1 missing or an install step failed, 2 usage.
+#
+# What vmq needs: zsh with the modules zsh/datetime, zsh/stat and zsh/net/tcp; jq; ps (and pkill on Linux, for the tests).
+#   macOS    zsh ships with macOS. jq: `brew install jq` (Homebrew).
+#   Linux    the distribution's package manager (apt-get, dnf, yum, pacman, zypper, apk): zsh, jq, procps. Run as root, through
+#            sudo without a password, or else the command to run is printed (a password prompt needs the user).
+#   Windows  Git Bash (Git for Windows; without it bin/vmq-setup.ps1 installs it first). zsh is not part of it, so the MSYS2 zsh package
+#            and the DLLs it needs that Git does not have are put into Git's own usr/ folder (they share Git's MSYS runtime,
+#            msys-2.0.dll). jq is the MSYS2 jq package too: a native Windows jq.exe ends its lines with CRLF, and the \r stays
+#            in every value vmq reads with $(jq -r …). Each package's SHA-256 is checked against the MSYS2 package index
+#            (msys.db) first. Files Git already has are never replaced.
+#            When Git's folder is not writable by this user (Git installed for all users), the copy runs elevated, so Windows
+#            shows one administrator prompt (UAC) the user answers.
+set -o pipefail
+
+check_only=0
+case ${1:-} in
+  --check) check_only=1 ;;
+  '') ;;
+  *) echo "usage: vmq-setup [--check]" >&2; exit 2 ;;
+esac
+
+# Progress goes to stderr: stdout holds only the `missing:` lines, and steps inside pipelines (zstd_cat | tar) must not
+# write into the pipe
+say() { printf 'vmq-setup: %s\n' "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+case "$(uname -s)" in
+  Darwin) host=macos ;;
+  Linux) host=linux ;;
+  MINGW*|MSYS*|CYGWIN*) host=windows ;;
+  *) say "unsupported host: $(uname -s). vmq runs on macOS, Linux (also WSL2) and Windows Git Bash"; exit 1 ;;
+esac
+
+# Prints one line per missing program; returns 1 when any is missing
+missing_list() {
+  local n=0
+  if ! have zsh; then echo "missing: zsh"; n=1
+  elif ! zsh -fc 'zmodload zsh/datetime && zmodload -F zsh/stat b:zstat && zmodload zsh/net/tcp' >/dev/null 2>&1; then
+    echo "missing: zsh modules (zsh/datetime, zsh/stat, zsh/net/tcp)"; n=1
+  fi
+  if ! have jq; then echo "missing: jq"; n=1
+  elif [ $host = windows ] && jq -n -r '"x"' | od -c | grep -q '\\r'; then
+    echo "missing: jq that writes LF line ends (the jq on PATH is a native Windows build that writes CRLF)"; n=1
+  fi
+  have ps || { echo "missing: ps"; n=1; }
+  if [ $host = linux ]; then have pkill || { echo "missing: pkill (procps)"; n=1; }; fi
+  # WSL 1's file locks do not keep other processes out, so vmq refuses there (lib/vmq.zsh, VMQ_WSL1)
+  if [ $host = linux ] && grep -q Microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+    echo "missing: WSL 2 (this is WSL 1; in Windows run: wsl --set-version <distribution> 2)"; n=1
+  fi
+  return $n
+}
+
+if missing=$(missing_list); then
+  say "ok: $(zsh --version 2>/dev/null | head -1), $(jq --version 2>/dev/null)"
+  exit 0
+fi
+printf '%s\n' "$missing"
+[ $check_only = 1 ] && exit 1
+
+install_macos() {
+  if ! have jq; then
+    have brew || { say "install Homebrew (https://brew.sh), then run vmq-setup again; or install jq from https://jqlang.org/download/"; return 1; }
+    say "brew install jq"; brew install jq || return 1
+  fi
+  have zsh || { say "zsh is missing from this Mac; install it with: brew install zsh"; return 1; }
+}
+
+install_linux() {
+  local pm pkgs run=""
+  if have apt-get; then pm="apt-get install -y"; pkgs="zsh jq procps"
+  elif have dnf; then pm="dnf install -y"; pkgs="zsh jq procps-ng"
+  elif have yum; then pm="yum install -y"; pkgs="zsh jq procps-ng"
+  elif have pacman; then pm="pacman -S --needed --noconfirm"; pkgs="zsh jq procps-ng"
+  elif have zypper; then pm="zypper --non-interactive install"; pkgs="zsh jq procps"
+  elif have apk; then pm="apk add"; pkgs="zsh jq procps"
+  else say "no known package manager: install zsh, jq and procps yourself"; return 1
+  fi
+  if [ "$(id -u)" = 0 ]; then run=""
+  elif have sudo && sudo -n true 2>/dev/null; then run="sudo"
+  else
+    say "installing needs root. Run this yourself (in Claude Code, type it after !): sudo ${pm%% *} ${pm#* } $pkgs"
+    [ "${pm%% *}" = apt-get ] && say "on apt-get, run sudo apt-get update first if the install cannot find a package"
+    return 1
+  fi
+  [ "${pm%% *}" = apt-get ] && { say "$run apt-get update"; $run apt-get update -q || return 1; }
+  say "$run $pm $pkgs"
+  $run $pm $pkgs
+}
+
+# Windows: the folder Git's MSYS runtime maps to / (holds usr/bin/msys-2.0.dll)
+winpath() { cygpath -w "$1"; }
+
+# The zstd build used on Windows to read MSYS2 packages, pinned with its SHA-256. The value is the one GitHub lists for this
+# release asset and the one measured from two downloads (2026-11-27). To move to a newer release, read the asset's digest:
+# gh api repos/facebook/zstd/releases/tags/<tag> -q '.assets[] | select(.name|test("win64.zip")) | .digest'
+ZSTD_URL=https://github.com/facebook/zstd/releases/download/v1.6.0/zstd-v1.6.0-win64.zip
+ZSTD_SHA256=d1b4337932739f4dca65c9e98517d1dc6724d6f378dfff2ebb0ead81b9e6d4f2
+
+# Extracts a .zst file to stdout: zstd when present, else a zstd.exe downloaded into the work folder
+zstd_cat() {
+  if have zstd; then zstd -dc "$1"; return; fi
+  if [ ! -x "$work/zstd/zstd.exe" ]; then
+    say "downloading zstd: $ZSTD_URL"
+    curl -fsSL -o "$work/zstd.zip" "$ZSTD_URL" || return 1
+    [ "$(sha256_of "$work/zstd.zip")" = "$ZSTD_SHA256" ] || { say "SHA-256 of the zstd download does not match: not used"; return 1; }
+    mkdir -p "$work/zstd-x" && (cd "$work/zstd-x" && unzip -q ../zstd.zip 2>/dev/null || powershell.exe -NoProfile -Command "Expand-Archive -Path '$(winpath "$work/zstd.zip")' -DestinationPath '$(winpath "$work/zstd-x")'") || return 1
+    mkdir -p "$work/zstd" && cp "$(find "$work/zstd-x" -name zstd.exe | head -1)" "$work/zstd/zstd.exe" || return 1
+  fi
+  "$work/zstd/zstd.exe" -dc "$1"
+}
+
+sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
+
+# Downloads one MSYS2 package named in msys.db, checks its SHA-256 and extracts the given paths into the staging folder
+msys_package() {
+  local name=$1 desc file sum; shift
+  desc=$(ls -d "$work/db/$name"-[0-9]* 2>/dev/null | head -1)
+  [ -n "$desc" ] || { say "package $name is not in the MSYS2 index"; return 1; }
+  file=$(awk '/^%FILENAME%/{getline; print}' "$desc/desc")
+  sum=$(awk '/^%SHA256SUM%/{getline; print}' "$desc/desc")
+  say "downloading MSYS2 package $file"
+  curl -fsSL -o "$work/$file" "https://repo.msys2.org/msys/x86_64/$file" || return 1
+  [ "$(sha256_of "$work/$file")" = "$sum" ] || { say "SHA-256 of $file does not match the MSYS2 index: not installed"; return 1; }
+  zstd_cat "$work/$file" | tar -x -C "$work/stage" "$@" 2>/dev/null
+  # tar exits 2 when a pattern matched nothing; the files that must exist are checked after the copy
+  return 0
+}
+
+install_windows() {
+  local root wroot dll
+  have curl || { say "curl is missing from Git Bash"; return 1; }
+  root=$(winpath /)
+  work=$(mktemp -d "${TMPDIR:-/tmp}/vmq-setup.XXXXXX") || return 1
+  mkdir -p "$work/stage/usr/bin" "$work/db"
+  local need_zsh=0 need_jq=0
+  if ! have zsh || ! zsh -fc 'zmodload zsh/datetime && zmodload zsh/net/tcp' >/dev/null 2>&1; then need_zsh=1; fi
+  [ -e /usr/bin/jq.exe ] || need_jq=1
+  [ $need_zsh = 1 ] || [ $need_jq = 1 ] || { say "nothing to copy"; return 0; }
+  say "reading the MSYS2 package index"
+  curl -fsSL -o "$work/msys.db" https://repo.msys2.org/msys/x86_64/msys.db || return 1
+  zstd_cat "$work/msys.db" | tar -x -C "$work/db" || return 1
+  [ $need_zsh = 1 ] && { msys_package zsh --wildcards 'usr/bin/*' 'usr/lib/zsh/*' || return 1; }
+  [ $need_jq = 1 ] && { msys_package jq usr/bin/jq.exe || return 1; }
+  # The DLLs zsh and jq need; a package is fetched only when Git lacks its DLL
+  for dll in ncurses:msys-ncursesw6.dll libiconv:msys-iconv-2.dll libpcre2_8:msys-pcre2-8-0.dll oniguruma:msys-onig-5.dll gcc-libs:msys-gcc_s-seh-1.dll; do
+    [ -e "/usr/bin/${dll#*:}" ] || msys_package "${dll%%:*}" "usr/bin/${dll#*:}" || return 1
+  done
+  # Copy without replacing anything Git has (cp -n). Git installed for all users needs an elevated copy.
+  if ( : > /usr/bin/.vmq-setup-write ) 2>/dev/null; then
+    rm -f /usr/bin/.vmq-setup-write
+    say "copying into ${root}usr"
+    cp -R -n "$work/stage/usr/." /usr/ || return 1
+  else
+    say "Git's folder ($root) needs administrator rights: Windows will ask once (UAC) to copy the files"
+    wroot=$(winpath "$work/stage/usr")
+    # robocopy /E copies subfolders; /XC /XN /XO skip files that already exist. Exit codes below 8 are success.
+    powershell.exe -NoProfile -Command "\$p = Start-Process robocopy -ArgumentList '\"$wroot\"','\"${root}usr\"','/E','/XC','/XN','/XO','/NFL','/NDL','/NJH','/NJS' -Verb RunAs -Wait -PassThru; exit [int](\$p.ExitCode -ge 8)" \
+      || { say "the elevated copy did not finish (was the prompt declined?)"; return 1; }
+  fi
+  rm -rf "$work"
+}
+
+say "installing for $host"
+case $host in
+  macos) install_macos ;;
+  linux) install_linux ;;
+  windows) install_windows ;;
+esac || { say "install did not finish"; exit 1; }
+hash -r
+if missing=$(missing_list); then
+  say "done: $(zsh --version | head -1), $(jq --version)"
+  exit 0
+fi
+printf '%s\n' "$missing"
+say "still missing after the install"
+exit 1

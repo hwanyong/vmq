@@ -40,10 +40,17 @@ export type Snapshot = {
 }
 
 // Where this host keeps reservations.tsv and the mod's shared read cache (from `vmq paths --json`, lib/paths.zsh).
-export type DataPaths = { rules: string; cache: string }
+// mainFailed: a file in the cache folder holding the last stderr line of a failed automatic vmq-main start (empty after a
+// start that worked), so every new session does not show the same failure again.
+export type DataPaths = { rules: string; cache: string; mainFailed: string }
+
+// What goes before a script of this plugin in a command line. Empty on macOS and Linux (the script runs by its #! line). On
+// Windows a process cannot start a #! script, so it runs through Git Bash: [<Git>\bin\bash.exe, -c, exec "$0" "$@"].
+// isKnown is false until the first look in this session.
+export type Shell = { isKnown: boolean; argv: string[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    'vmq': { snapshot: Shaped<Snapshot>; paths: Shaped<DataPaths> }
+    'vmq': { snapshot: Shaped<Snapshot>; paths: Shaped<DataPaths>; shell: Shaped<Shell> }
   }
 }

@@ -47,6 +47,7 @@
 
 zmodload zsh/datetime
 zmodload -F zsh/stat b:zstat
+zmodload zsh/system
 
 VMQ_ROOT=${${(%):-%x}:A:h:h}
 source "$VMQ_ROOT/lib/paths.zsh"
@@ -245,21 +246,38 @@ vmq_tool_current() {
 
 vmq_log() { print -r -- "$(strftime '%Y-%m-%d %H:%M:%S' $EPOCHSECONDS) $*" >> "$VMQ_DIR/log" }
 
-# The lock held while the queue is changed. mkdir is atomic on local APFS. A lock older than 30 seconds is taken as left by an
-# ended process.
+# The lock held while the queue is changed: an fcntl lock (zsystem flock) on $VMQ_DIR/.lock. The kernel ties it to the process
+# that holds it, so only that process releases it (vmq_unlock), and the kernel releases it when that process ends, also by exit
+# or KILL. A caller waits up to VMQ_LOCK_WAIT seconds (default 120), then gives up with exit code 1.
+# Before, the lock was a directory (mkdir .mutex) with a rule that a lock older than 30 seconds was left by an ended process. On
+# a GitHub ubuntu runner two processes held it at once (CI runs 46036892280 and 46037313663, traced with the holder's pid written into the lock):
+# one process's rmdir removed a lock another process had just taken, and from then on each release removed the next holder's
+# lock. A turn file was then written again after its turn was released, which left an empty request that kept two targets
+# assigned to an owner that had ended (tests/pair.zsh, CI run 46032992617). The 30-second rule would also take a lock from a
+# holder slower than that (a slow disk or host).
+# Inside the holding process the lock file must not be opened and closed again: closing any descriptor of the file releases
+# the process's fcntl locks. Subshells and child processes do not hold the lock, so their opening and closing does not release it.
+# WSL 1 runs Linux programs on the Windows kernel, and there fcntl locks do not keep other processes out (CI run 46039179664:
+# 8 processes adding 25 each under the lock ended at 2, not 200). WSL 2 runs a Linux kernel. So on WSL 1 vmq refuses to change
+# the queue instead of changing it without a lock. WSL 1's kernel release names Microsoft (4.4.0-<build>-Microsoft); WSL 2's
+# ends in microsoft-standard-WSL2.
+VMQ_LOCK_WAIT=${VMQ_LOCK_WAIT:-120}
+typeset -g VMQ_LOCK_FD=
+typeset -g VMQ_WSL1=0
+[[ -r /proc/sys/kernel/osrelease && $(</proc/sys/kernel/osrelease) == *Microsoft* ]] && VMQ_WSL1=1
 vmq_lock() {
-  local m="$VMQ_DIR/.mutex" i=0
+  local f="$VMQ_DIR/.lock" fd
+  (( ! VMQ_WSL1 )) || { print -u2 "vmq: WSL 1 is not supported: its file locks do not keep other processes out. Convert the distribution to WSL 2 (in Windows: wsl --set-version <distribution> 2)"; return 1 }
   mkdir -p "$VMQ_DIR"
-  until mkdir "$m" 2>/dev/null; do
-    if (( EPOCHSECONDS - $(zstat +mtime -- "$m" 2>/dev/null || print $EPOCHSECONDS) > 30 )); then
-      rmdir "$m" 2>/dev/null && vmq_log "lock-cleared (older than 30 s)"
-      continue
-    fi
-    sleep 0.05
-    (( ++i < 600 )) || { print -u2 "vmq: could not get the lock ($m)"; return 1 }
-  done
+  [[ -e $f ]] || : >> "$f" || return 1
+  zsystem flock -t $VMQ_LOCK_WAIT -f fd "$f" || { print -u2 "vmq: could not get the lock in $VMQ_LOCK_WAIT s ($f)"; return 1 }
+  VMQ_LOCK_FD=$fd
 }
-vmq_unlock() { rmdir "$VMQ_DIR/.mutex" 2>/dev/null }
+vmq_unlock() {
+  [[ -n $VMQ_LOCK_FD ]] || return 0
+  zsystem flock -u $VMQ_LOCK_FD
+  VMQ_LOCK_FD=
+}
 
 # Turn files of a target, oldest first: vmq_tickets <vm> → reply
 vmq_tickets() { reply=("$VMQ_DIR/$1"/<->-*(N.on)) }
@@ -282,10 +300,24 @@ vmq_write() {
 # `ps -o lstart=` prints in the caller's locale and time zone, so a writer and a reader with different LANG or TZ would take a
 # live process as ended. A value written before this rule is written again by the holder's next vmq_require (vmq_attach);
 # until then expiry is judged by VM_QUEUE_LEASE from the last activity.
+# Git Bash (OSTYPE cygwin or msys) has a ps without -o, and its start time (field 22 of /proc/<PID>/stat) is set again when
+# the process execs another program (CI run 46030706984: 304964 before `exec sleep`, 305037 after), which would take a script
+# whose shell execs as ended. There the value is the process group and session (fields 5 and 6), which exec keeps:
+# `<PID>@g<group>s<session>`. A reused PID is taken as alive only when it also has that group and session, which is less
+# certain than a start time. Fields 3 on follow the `(<command>) ` part, which can hold spaces.
 vmq_proc_id() {
-  local s=$(LC_ALL=C TZ=UTC ps -o lstart= -p $1 2>/dev/null)
-  [[ -n ${s// } ]] || return 1
-  print -r -- "$1@${(j:_:)${=s}}"
+  local s f
+  if [[ $OSTYPE == (cygwin|msys)* ]]; then
+    s=$(<"/proc/$1/stat") 2>/dev/null || return 1
+    f=(${=${s##*\) }})
+    [[ -n ${f[4]:-} ]] || return 1
+    s="g${f[3]}s${f[4]}"
+  else
+    s=$(LC_ALL=C TZ=UTC ps -o lstart= -p $1 2>/dev/null)
+    [[ -n ${s// } ]] || return 1
+    s=${(j:_:)${=s}}
+  fi
+  print -r -- "$1@$s"
 }
 # The live processes among procs: vmq_procs_alive <procs> → prints the live ones space-separated. 1 when none.
 vmq_procs_alive() {

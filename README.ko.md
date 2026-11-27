@@ -15,8 +15,9 @@ plugin 은 네 부분으로 되어 있습니다.
 
 ## 요구 사항
 
-- macOS 또는 Linux. Windows 에서는 Claude Code 를 WSL2 안에서 실행합니다(Linux 호스트). native Windows 는 지원하지 않습니다
-- zsh, `jq`, Linux 에서는 `procps`(`ps` · `pkill`). `hosts.tsv` 의 주소 확인에는 `nc` 가 있으면 씁니다
+- macOS, Linux, WSL2 안의 Windows(Linux 호스트), 또는 Git Bash(Git for Windows)가 있는 native Windows. WSL 1 은 거절합니다. 파일 잠금이 다른 프로세스를 막지 않기 때문입니다(`wsl --set-version <배포판> 2` 로 바꿉니다)
+- zsh, `jq`, Linux 에서는 `procps`(`ps` · `pkill`). `hosts.tsv` 의 주소 확인에는 `nc` 가 있으면 씁니다. 이것들은 직접
+  설치하지 않습니다. `vmq-setup` 이 설치하고 Claude 가 그것을 실행합니다(「설정」)
 - plugin hooks 모듈(mod)과 plugin `bin/` 의 PATH 등록을 지원하는 Claude Code. 2.1.332 에서 시험했습니다
 
 ## 설치
@@ -34,6 +35,27 @@ Claude Code 안에서:
 claude plugin marketplace add hwanyong/vmq
 claude plugin install vmq@vmq --scope user
 ```
+
+## 설정
+
+설치한 뒤 Claude Code 세션을 새로 엽니다. vmq 에 필요한 것이 빠져 있으면 status line 이 `vmq: setup needed (…). Run /vmq-setup` 을 보입니다. `/vmq-setup` 을 실행하거나 Claude 에게 vmq 설정을 요청합니다. 스킬 `vmq:queue` 에 따라 Claude 가 `vmq-setup --check` 와 `vmq-setup` 을 차례로 실행하고, `vmq-setup` 은 빠진 것만 설치하며 단계마다 찍습니다.
+
+| 호스트 | `vmq-setup` 이 설치하는 것 | 사용자가 할 수도 있는 일 |
+|---|---|---|
+| macOS | Homebrew 로 `jq`(zsh 는 macOS 에 있습니다) | Homebrew 가 없으면 설치 |
+| Linux · WSL2 | 배포판의 패키지 관리자로 `zsh` · `jq` · `procps` | sudo 가 암호를 물으면, 찍힌 `sudo …` 줄을 Claude Code 에서 `!` 뒤에 적어 실행 |
+| Git Bash 가 있는 Windows | MSYS2 의 `zsh` 패키지와 그것이 쓰는 DLL(MSYS2 패키지 색인의 SHA-256 으로 검사), MSYS2 의 `jq` 패키지(native Windows `jq.exe` 는 줄 끝을 CRLF 로 냅니다)를 Git 의 `usr` 폴더에 복사. Git 의 파일은 바꾸지 않습니다 | Git 이 모든 사용자용으로 설치되어 있으면 관리자 권한 요청(UAC) 한 번을 승인 |
+| Git Bash 가 없는 Windows | winget 으로 Git for Windows 를 이 사용자용으로 먼저 설치(`bin/vmq-setup.ps1`, Claude 가 PowerShell 도구로 실행)한 뒤 위 줄 | Bash 도구가 Git Bash 를 쓰도록 Claude Code 를 다시 시작 |
+
+Windows 의 Claude Code 는 Git for Windows 가 있으면 Bash 도구에 Git Bash 를 쓰고, 없으면 PowerShell 도구만 씁니다([설치 문서](https://code.claude.com/docs/en/setup.md)). vmq 는 Git Bash 에서 돕니다.
+
+`vmq-main` 을 처음 열 때 Claude Code 가 그 작업 폴더인 데이터 폴더를 신뢰해야 합니다. 신뢰는 Claude Code 의 신뢰 확인 화면에서 사용자가 주므로 Claude 가 대신 줄 수 없습니다. 터미널에서 한 번 실행해 확인을 승인하고 끝냅니다.
+
+```sh
+cd "$(vmq paths | awk -F'\t' '$1 == "data" { print $2 }')" && claude
+```
+
+`vmq paths` 가 데이터 폴더를 찍습니다(macOS 에서는 `~/Library/Application Support/vmq`). 그 전까지 `vmq-main` 은 열리지 않고, mod 는 그 실패를 세션마다가 아니라 한 번만 보입니다.
 
 그다음 세션들이 함께 쓰는 대상을 등록합니다(아래 「대상」). Claude 에게 말로 요청하면(「이 Mac 의 시험 VM TestServer · TestClient 를 등록해 줘. 역할은 server · client」) 스킬 `vmq:queue` 가 명령을 실행합니다. 직접 실행해도 됩니다.
 
@@ -108,6 +130,7 @@ CLI 와 라이브러리가 읽습니다. Claude Code 안에서 `bin/vmq` 를 실
 | `VM_QUEUE_LABEL` | 없음 | 차례의 설명. `-l` 과 같습니다 |
 | `VM_QUEUE_TICKET` | 없음 | `vmq_require` · `vmq release` 등을 차례 키 하나(`vmq ticket`)에 고정합니다 |
 | `VM_QUEUE_INTERNAL` | 없음 | `1` 이면 검사를 건너뜁니다. 다른 Mac 에서 자기를 다시 실행하는 도구가 씁니다 |
+| `VMQ_LOCK_WAIT` | 120 | 명령이 큐 잠금을 기다리다 포기하는(종료 코드 1) 초 |
 | `VMQ_SSH_RETRY_S` | 30 | 배너 교환에서 끝난 연결을 `vmq_ssh` 가 다시 시도하는 초 |
 | `VMQ_REQUIRED_REF` | `main` | `.vmq-required` 를 읽는 브랜치(「규칙」) |
 
@@ -126,6 +149,7 @@ CLI 와 라이브러리가 읽습니다. Claude Code 안에서 `bin/vmq` 를 실
 | `vmq paths [--json]` | 이 호스트에서 데이터 폴더 · 대상 목록 · 큐 · 캐시가 있는 곳 |
 | `vmq peek-check '<명령 한 줄>'` | 차례 없이 실행해도 되는 읽기인지 판별합니다 |
 | `/vmq` · `/vmq-main` | pane 을 엽니다 · `vmq-main` 세션을 엽니다 |
+| `vmq-setup [--check]` · `/vmq-setup` | vmq 에 필요한 것을 확인하고 설치합니다(「설정」) · Claude 에게 그 실행을 요청합니다 |
 
 묶음은 대상 이름, 쉼표로 적은 후보(`Server1,Server2`), 역할(`@server`), `+` 로 이어 함께 받는 대상(`Server2+Client2`) 가운데 하나입니다. `@server+@client` 는 같은 Mac 의 서버 · 클라이언트를 받습니다. 종료 코드: 0 완료, 1 거절 · 오류, 2 사용법, 75 기다리는 중.
 
@@ -154,7 +178,7 @@ vmq_require TestServer || exit 1
 | 차례 | 대상을 바꾸는 명령(켜기 · 끄기 · 스냅숏 · 되돌리기 · 설치 · 화면 조작 · 화면 캡처 · 시험 실행)은 그 대상의 차례를 잡은 소유자만 실행합니다. 프로젝트 도구가 명령마다 `vmq_require <대상>…` 를 부르고, 거절되면 종료 코드 1 로 끝납니다 |
 | 요청 | 소유자마다 요청 하나입니다. 묶음마다 대상 하나를 받고, 후보 가운데 먼저 비는 것을 받고, `+` 로 이은 후보는 그 대상이 모두 빌 때 받습니다. 대상을 한꺼번에 받으므로 하나를 쥔 채 다른 것을 기다리는 일(교착)이 없습니다. 잡은 뒤 더 받으려면 놓고 함께 다시 받습니다. 기다리는 동안 다른 묶음으로 `acquire` 하면 같은 일련번호로 요청이 바뀝니다 |
 | 배정 | 기다리는 차례를 일련번호 순으로 보며 묶음마다 빈 후보를 고릅니다. 채워지지 않는 차례는 건너뛰므로 뒤 차례가 빈 대상을 씁니다. `VM_QUEUE_STARVE` 보다 오래 기다린 차례는 자기 후보 중 빈 대상을 맡아 둡니다 |
-| 만료 | `VM_QUEUE_LEASE` 초 동안 활동이 없는 차례는 지워집니다. `vmq_require` 는 부른 셸의 PID 와 시작 시각을 차례에 적고, 그 프로세스가 살아 있는 동안은 마지막 제어 명령 또는 `vmq_keepalive` 에서 `VM_QUEUE_HOLD_MAX` 초까지 차례를 지우지 않습니다. 시작 시각은 `LC_ALL=C TZ=UTC` 로 읽으므로 다시 쓰인 PID 를 살아 있는 것으로 보지 않습니다 |
+| 만료 | `VM_QUEUE_LEASE` 초 동안 활동이 없는 차례는 지워집니다. Windows(Git Bash)에서는 Cygwin 이 exec 때 시작 시각을 새로 정하므로, 시작 시각 대신 프로세스 그룹과 세션 번호로 프로세스를 가립니다. `vmq_require` 는 부른 셸의 PID 와 시작 시각을 차례에 적고, 그 프로세스가 살아 있는 동안은 마지막 제어 명령 또는 `vmq_keepalive` 에서 `VM_QUEUE_HOLD_MAX` 초까지 차례를 지우지 않습니다. 시작 시각은 `LC_ALL=C TZ=UTC` 로 읽으므로 다시 쓰인 PID 를 살아 있는 것으로 보지 않습니다 |
 | 끝난 사슬 | 사슬은 차례를 한 번 받아 대상을 다루고 끝나는 셸입니다. `vmq_chain_mark <pid> <대상>…` 가 그 셸을 차례에 적습니다. 사슬이 끝난 차례는 그 뒷정리가 놓거나 만료될 때까지 같은 소유자의 다음 `acquire` 에도 넘기지 않으므로, 뒷정리가 다음 사슬의 대상을 다루지 않습니다 |
 | 차례 고정 | `VM_QUEUE_TICKET=<키>` 를 주면 `vmq_require` · `vmq_keepalive` · `vmq_chain_of` · `vmq_chain_mark` · `vmq release` · `vmq mine` 이 그 차례에만 동작하므로, 뒷정리가 같은 소유자의 새 차례에 적용되지 않습니다 |
 | 도구의 판 | 부른 스크립트가 있는 git 작업 트리의 `main` 에 `.vmq-required`(줄 형식 `<커밋>\t<경로>\t<설명>`)가 있으면, HEAD 가 줄마다 그 커밋을 포함하거나 그 경로가 `main` 과 같을 때만 `vmq_require` 가 통과합니다. 오래된 작업 트리의 도구는 `main` 에 들어간 고침 없이 대상을 다루지 못합니다 |
@@ -213,6 +237,8 @@ mod 를 로드한 뒤 첫 읽기는 목록만 채웁니다. 그 뒤 새 판정�
 `vmq-main` 은 큐를 지켜보는 background 세션 한 개입니다. 큐는 이 세션 없이도 돕니다. 이 세션은 예약을 적고, 예약에 어긋난 차례를 그 프로젝트의 관리 세션에 알리고, 만료가 가까운 차례를 알리고, 쥔 프로세스가 끝난 차례를 놓습니다. 역할 지시문은 `VMQ-MAIN.md` 이고, mod 가 이름이 `vmq-main` 인 세션의 시스템 프롬프트에 요청마다 넣으므로 `/clear` · compact 뒤에도 남습니다.
 
 자동(`autoStartMain`) · `/vmq-main` · 셸의 `vmq-main` 으로 엽니다. `bin/vmq-main` 은 잠금 안에서 살아 있는 `vmq-main` 을 확인하므로, 세션 여럿이 함께 시작해도 하나만 열립니다. 이름 `vmq-main`(다른 세션이 이 이름으로 보냅니다) · 권한 모드 `bypassPermissions`(권한 모드가 다른 세션의 메시지는 승인을 기다립니다) · 작업 폴더 `$VMQ_DATA` 로 엽니다. 같은 이름의 세션이 둘이 되면 나중 세션은 역할 대신 경고를 받습니다.
+
+데이터 폴더를 아직 신뢰하지 않았으면 `claude --bg` 가 거절하고, `bin/vmq-main` 은 그 폴더와 실행할 명령을 stderr 한 줄로 적습니다(「설정」). mod 는 마지막 실패 줄을 `$VMQ_CACHE/vmq-main-failed.txt` 에 두고 줄이 새로울 때만 toast 를 보이므로, 같은 실패가 세션마다 보이지 않습니다.
 
 ## 시험
 

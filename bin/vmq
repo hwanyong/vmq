@@ -27,7 +27,8 @@
 #                                                The command gets the targets in VM_QUEUE_GRANTED (space-separated)
 #   vmq force-release <target>                   Removes the turn that holds that target. Only when the user says so
 #   vmq list                                     The target list (name, Mac, roles, operating system)
-#   vmq paths [--json]                           The data folder, target list, queue and cache folder in use (lib/paths.zsh)
+#   vmq paths [--json]                           The data folder, target list, queue and cache folder in use (lib/paths.zsh);
+#                                                --json gives the host's native paths (Windows paths on Windows)
 #   vmq init                                     Creates the data folder and an empty target list ($VMQ_REGISTRY) when absent
 #   vmq target add <name> <mac> <roles> <os>     Adds a target to the target list. <mac> is the SSH address of the Mac the
 #                                                target is on (any name for this Mac, such as localhost; targets with the same
@@ -256,9 +257,11 @@ peek-check)
   peek_allowed "$*" && print "read: may run without a turn"
   ;;
 paths)
-  # For the mod and for people: where this host keeps vmq's files. jq builds the JSON so any path is quoted right
+  # For the mod and for people: where this host keeps vmq's files. jq builds the JSON so any path is quoted right.
+  # --json is for programs outside this shell (the mod), so on Windows its paths are Windows paths (cygpath -w)
   if [[ ${1:-} == --json ]]; then
-    jq -n --arg data "$VMQ_DATA" --arg registry "$VMQ_REGISTRY" --arg queue "$VMQ_DIR" --arg hosts "$VMQ_HOSTS_FILE" --arg cache "$VMQ_CACHE" \
+    native() { if [[ $OSTYPE == (cygwin|msys)* ]]; then cygpath -w -- "$1"; else print -r -- "$1"; fi }
+    jq -n --arg data "$(native $VMQ_DATA)" --arg registry "$(native $VMQ_REGISTRY)" --arg queue "$(native $VMQ_DIR)" --arg hosts "$(native $VMQ_HOSTS_FILE)" --arg cache "$(native $VMQ_CACHE)" \
       '{data: $data, registry: $registry, queue: $queue, hosts: $hosts, cache: $cache}'
   else
     print -l -- "data	$VMQ_DATA" "registry	$VMQ_REGISTRY" "queue	$VMQ_DIR" "hosts	$VMQ_HOSTS_FILE" "cache	$VMQ_CACHE"
@@ -400,8 +403,10 @@ run)
   trap 'run_release; exit 143' TERM
   hold $owner 0 || { run_release; exit 1 }
   granted=$REPLY
-  # This process holds the turn while the command runs (so it does not expire even if the command never calls vmq_require)
-  vmq_lock || exit 1
+  # This process holds the turn while the command runs (so it does not expire even if the command never calls vmq_require).
+  # Without the lock the turn is released before exiting: it is held now, and nothing else would release it before its lease
+  # ran out (seen in tests/pair.zsh on CI runners)
+  vmq_lock || { run_release; exit 1 }
   { vmq_sync $owner; vmq_attach $REPLY $$ } always { vmq_unlock }
   VM_QUEUE_GRANTED=$granted "${cmdline[@]}"; rc=$?
   run_release

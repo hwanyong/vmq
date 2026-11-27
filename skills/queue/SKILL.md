@@ -5,7 +5,7 @@ description: Take a vmq turn before driving a VM, device, simulator, desktop app
 
 # vmq: take a turn before you drive a shared target
 
-When several sessions drive the same VM or device, one session's clicks, key presses or snapshot restores break another session's test. vmq is a queue: a session takes a turn on a target, drives it, and releases it. A target is listed in `~/Library/Application Support/vmq/resources.tsv` (`vmq list`).
+When several sessions drive the same VM or device, one session's clicks, key presses or snapshot restores break another session's test. vmq is a queue: a session takes a turn on a target, drives it, and releases it. A target is listed in the target list (`vmq list`; `vmq paths` prints where vmq keeps its files).
 
 The commands are `vmq` (on the Bash tool's PATH while this plugin is enabled; also `${CLAUDE_PLUGIN_ROOT}/bin/vmq`) and the shell library `${CLAUDE_PLUGIN_ROOT}/lib/vmq.zsh`. The owner of a turn is this session (`CLAUDE_CODE_SESSION_ID`).
 
@@ -39,7 +39,7 @@ Use this when the user asks to add, register, list or remove a VM, device, simul
 
 | Need | Command |
 |---|---|
-| First use (creates `~/Library/Application Support/vmq/resources.tsv`) | `vmq init` |
+| First use (creates the data folder and `resources.tsv`) | `vmq init` |
 | Add a target | `vmq target add <name> <mac> <roles> <os>` |
 | Remove a target (no turn may hold or wait for it) | `vmq target remove <name>` |
 | Change a target | `vmq target remove <name>`, then `vmq target add` with the new values |
@@ -59,7 +59,7 @@ Steps when the user asks in words:
 1. Collect the four values for each target. Ask the user for what you cannot read from the request. Do not guess the Mac address or the roles.
 2. Show the `vmq target add` lines you will run and run them. Each prints `added: …` or the reason it refused.
 3. Run `vmq list` and show the result.
-4. A Mac reachable on several addresses (a direct link and the LAN) can get a line in `~/Library/Application Support/vmq/hosts.tsv` (format in `${CLAUDE_PLUGIN_ROOT}/examples/hosts.tsv`). It is optional.
+4. A Mac reachable on several addresses (a direct link and the LAN) can get a line in `hosts.tsv` in the data folder (`vmq paths`) (format in `${CLAUDE_PLUGIN_ROOT}/examples/hosts.tsv`). It is optional.
 
 To limit how many builds run at once, add that many build slots with the same role and run builds with `vmq run @build -- <command>`: `vmq target add Build1 localhost build -`, `vmq target add Build2 localhost build -`.
 
@@ -85,4 +85,4 @@ Put this in its instructions:
 - `vmq: no turn for <target>`: acquire first.
 - `vmq: no target list`, or the status line says `vmq: no targets yet`: add targets ("Adding and removing targets" above; ask the user what they are).
 - `vmq: this owner already holds …`: release, then acquire everything together.
-- Reservations and priorities between projects are kept by the session `vmq-main` in `~/Library/Application Support/vmq/reservations.tsv`. Read it before choosing a target, and send requests about the queue (reservations, asking another session to release, a turn whose process is gone) to `vmq-main` with SendMessage, by that name. Do not run `vmq force-release` yourself unless the user says so.
+- Reservations and priorities between projects are kept by the session `vmq-main` in `reservations.tsv` in the data folder (`vmq paths`). Read it before choosing a target, and send requests about the queue (reservations, asking another session to release, a turn whose process is gone) to `vmq-main` with SendMessage, by that name. Do not run `vmq force-release` yourself unless the user says so.

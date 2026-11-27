@@ -15,8 +15,8 @@ The plugin has four parts:
 
 ## Requirements
 
-- macOS (the queue lives in `~/Library/Application Support`, and `nc -G` is the BSD `nc` option)
-- zsh, `jq`
+- macOS or Linux. On Windows, run Claude Code inside WSL2 (a Linux host). Native Windows is not supported
+- zsh, `jq`, and on Linux `procps` (`ps`, `pkill`). `nc` is used for `hosts.tsv` when present
 - Claude Code with plugin hooks modules (mods) and plugin `bin/` on the Bash tool's PATH. Tested with 2.1.332
 
 ## Install
@@ -48,7 +48,7 @@ Until a target is listed, the status line says `vmq: no targets yet` and `vmq-ma
 
 ## Targets
 
-The target list is `~/Library/Application Support/vmq/resources.tsv` (`VMQ_REGISTRY`). Change it with these commands, not by hand: they check the values, refuse a name that exists, refuse to remove a target a turn holds or waits for, and log the change in the queue log.
+The target list is `resources.tsv` in the data folder (`VMQ_REGISTRY`; `vmq paths` prints where it is). Change it with these commands, not by hand: they check the values, refuse a name that exists, refuse to remove a target a turn holds or waits for, and log the change in the queue log.
 
 | Command | What it does |
 |---|---|
@@ -82,7 +82,7 @@ vmq run @build -- make
 
 ### Plugin option
 
-Set at install, or later in `/config` under the vmq plugin.
+Set at install (`claude plugin install vmq@vmq --config autoStartMain=false`), or later with `/plugin configure vmq@vmq`. Until it is set, the default applies.
 
 | Option | Default | What it does |
 |---|---|---|
@@ -96,7 +96,8 @@ The CLI and library read these. For the mod, which runs `bin/vmq` from inside Cl
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `VMQ_DATA` | `~/Library/Application Support/vmq` | Data folder: target list, queue, reservations |
+| `VMQ_DATA` | macOS `~/Library/Application Support/vmq`, Linux `$XDG_DATA_HOME/vmq` (`~/.local/share/vmq`) | Data folder: target list, queue, reservations |
+| `VMQ_CACHE` | macOS `~/Library/Caches/vmq`, Linux `$XDG_CACHE_HOME/vmq` (`~/.cache/vmq`) | The mod's shared read cache |
 | `VMQ_REGISTRY` | `$VMQ_DATA/resources.tsv` | Target list |
 | `VMQ_HOSTS_FILE` | `$VMQ_DATA/hosts.tsv` | More SSH addresses per Mac |
 | `VM_QUEUE_DIR` | `$VMQ_DATA/queue` | The queue. Keep it on a local disk: `mkdir` is the lock and is not trusted to be atomic on SMB |
@@ -122,6 +123,7 @@ The CLI and library read these. For the mod, which runs `bin/vmq` from inside Cl
 | `vmq ended <target>` | How my last turn on it ended: `released`, `expired` or `force-released`, the time, and who took it next |
 | `vmq force-release <target>` | Removes the turn that holds it. Only when the user says so, or `vmq-main` for a turn whose process is gone |
 | `vmq list` · `vmq init` · `vmq target add` · `vmq target remove` | The target list ("Targets") |
+| `vmq paths [--json]` | Where this host keeps the data folder, target list, queue and cache |
 | `vmq peek-check '<command line>'` | Whether a read may run without a turn |
 | `/vmq` · `/vmq-main` | Opens the pane · opens the `vmq-main` session |
 
@@ -174,7 +176,7 @@ vmq_require TestServer || exit 1
 
 ## Reservations
 
-`$VMQ_DATA/reservations.tsv` holds reservations and priorities. The `vmq` command does not read it; sessions read it before choosing a target, the mod judges turns against it, and `vmq-main` writes it. One line per reservation, seven tab-separated columns; lines starting with `#` and blank lines are skipped.
+`reservations.tsv` in the data folder holds reservations and priorities. The `vmq` command does not read it; sessions read it before choosing a target, the mod judges turns against it, and `vmq-main` writes it. One line per reservation, seven tab-separated columns; lines starting with `#` and blank lines are skipped.
 
 | Column | Value |
 |---|---|
@@ -189,7 +191,7 @@ An owner without a session id (`VM_QUEUE_OWNER=build-1`) has no project, so its 
 
 ## The mod
 
-Every 30 s the mod reads `vmq status --json`, `claude agents --json --all` and `reservations.tsv`, and adds the session name, project and verdicts to each turn. It does not change the queue. The two commands' stdout is cached in `~/Library/Caches/vmq/status.json` for 25 s and shared by sessions, because `vmq status` holds the queue lock for about 2 s.
+Every 30 s the mod reads `vmq status --json`, `claude agents --json --all` and `reservations.tsv`, and adds the session name, project and verdicts to each turn. It does not change the queue. The two commands' stdout is cached in `$VMQ_CACHE/status.json` for 25 s and shared by sessions, because `vmq status` holds the queue lock for about 2 s.
 
 | Where | What |
 |---|---|

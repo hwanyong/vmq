@@ -15,8 +15,8 @@ plugin 은 네 부분으로 되어 있습니다.
 
 ## 요구 사항
 
-- macOS(큐가 `~/Library/Application Support` 에 있고, `nc -G` 는 BSD `nc` 의 선택 사항입니다)
-- zsh, `jq`
+- macOS 또는 Linux. Windows 에서는 Claude Code 를 WSL2 안에서 실행합니다(Linux 호스트). native Windows 는 지원하지 않습니다
+- zsh, `jq`, Linux 에서는 `procps`(`ps` · `pkill`). `hosts.tsv` 의 주소 확인에는 `nc` 가 있으면 씁니다
 - plugin hooks 모듈(mod)과 plugin `bin/` 의 PATH 등록을 지원하는 Claude Code. 2.1.332 에서 시험했습니다
 
 ## 설치
@@ -48,7 +48,7 @@ vmq list
 
 ## 대상
 
-대상 목록은 `~/Library/Application Support/vmq/resources.tsv`(`VMQ_REGISTRY`)입니다. 파일을 직접 고치지 않고 아래 명령으로 바꿉니다. 명령은 값을 검사하고, 이미 있는 이름을 거절하고, 차례가 쥐거나 기다리는 대상은 지우지 않고, 바꾼 내용을 큐 로그에 적습니다.
+대상 목록은 데이터 폴더의 `resources.tsv`(`VMQ_REGISTRY`)입니다. 위치는 `vmq paths` 가 찍습니다. 파일을 직접 고치지 않고 아래 명령으로 바꿉니다. 명령은 값을 검사하고, 이미 있는 이름을 거절하고, 차례가 쥐거나 기다리는 대상은 지우지 않고, 바꾼 내용을 큐 로그에 적습니다.
 
 | 명령 | 하는 일 |
 |---|---|
@@ -82,7 +82,7 @@ vmq run @build -- make
 
 ### plugin 선택 사항
 
-설치할 때 정하거나 나중에 `/config` 의 vmq plugin 항목에서 바꿉니다.
+설치할 때 정하거나(`claude plugin install vmq@vmq --config autoStartMain=false`) 나중에 `/plugin configure vmq@vmq` 로 바꿉니다. 정하기 전에는 기본값이 적용됩니다.
 
 | 선택 사항 | 기본값 | 하는 일 |
 |---|---|---|
@@ -96,7 +96,8 @@ CLI 와 라이브러리가 읽습니다. Claude Code 안에서 `bin/vmq` 를 실
 
 | 변수 | 기본값 | 뜻 |
 |---|---|---|
-| `VMQ_DATA` | `~/Library/Application Support/vmq` | 데이터 폴더: 대상 목록 · 큐 · 예약 |
+| `VMQ_DATA` | macOS `~/Library/Application Support/vmq`, Linux `$XDG_DATA_HOME/vmq`(`~/.local/share/vmq`) | 데이터 폴더: 대상 목록 · 큐 · 예약 |
+| `VMQ_CACHE` | macOS `~/Library/Caches/vmq`, Linux `$XDG_CACHE_HOME/vmq`(`~/.cache/vmq`) | mod 가 세션들과 함께 쓰는 읽기 캐시 |
 | `VMQ_REGISTRY` | `$VMQ_DATA/resources.tsv` | 대상 목록 |
 | `VMQ_HOSTS_FILE` | `$VMQ_DATA/hosts.tsv` | Mac 마다 더 시도할 SSH 주소 |
 | `VM_QUEUE_DIR` | `$VMQ_DATA/queue` | 큐. 로컬 디스크에 둡니다. 잠금이 `mkdir` 이고, SMB 에서는 `mkdir` 이 원자적이라고 믿지 않습니다 |
@@ -122,6 +123,7 @@ CLI 와 라이브러리가 읽습니다. Claude Code 안에서 `bin/vmq` 를 실
 | `vmq ended <대상>` | 그 대상에서 내 마지막 차례가 끝난 사건(`released` · `expired` · `force-released`) · 시각 · 그 뒤 잡은 소유자 |
 | `vmq force-release <대상>` | 그 대상을 잡은 차례를 지웁니다. 사용자가 지시할 때, 또는 쥔 프로세스가 끝난 차례에 `vmq-main` 이 씁니다 |
 | `vmq list` · `vmq init` · `vmq target add` · `vmq target remove` | 대상 목록(「대상」) |
+| `vmq paths [--json]` | 이 호스트에서 데이터 폴더 · 대상 목록 · 큐 · 캐시가 있는 곳 |
 | `vmq peek-check '<명령 한 줄>'` | 차례 없이 실행해도 되는 읽기인지 판별합니다 |
 | `/vmq` · `/vmq-main` | pane 을 엽니다 · `vmq-main` 세션을 엽니다 |
 
@@ -174,7 +176,7 @@ vmq_require TestServer || exit 1
 
 ## 예약
 
-`$VMQ_DATA/reservations.tsv` 에 예약 · 우선순위를 둡니다. `vmq` 명령은 이 파일을 읽지 않습니다. 각 세션이 대상을 고르기 전에 읽고, mod 가 차례를 이 파일과 대조하고, `vmq-main` 이 적습니다. 줄마다 탭으로 나눈 일곱 칸이고 `#` 으로 시작하는 줄과 빈 줄은 읽지 않습니다.
+데이터 폴더의 `reservations.tsv` 에 예약 · 우선순위를 둡니다. `vmq` 명령은 이 파일을 읽지 않습니다. 각 세션이 대상을 고르기 전에 읽고, mod 가 차례를 이 파일과 대조하고, `vmq-main` 이 적습니다. 줄마다 탭으로 나눈 일곱 칸이고 `#` 으로 시작하는 줄과 빈 줄은 읽지 않습니다.
 
 | 칸 | 값 |
 |---|---|
@@ -189,7 +191,7 @@ vmq_require TestServer || exit 1
 
 ## mod
 
-mod 는 30초마다 `vmq status --json` · `claude agents --json --all` · `reservations.tsv` 를 읽어 차례마다 세션 이름 · 프로젝트 · 판정을 붙입니다. 큐는 바꾸지 않습니다. 두 명령의 stdout 은 `~/Library/Caches/vmq/status.json` 에 25초 동안 캐시해 세션들이 함께 씁니다. `vmq status` 가 큐 잠금을 약 2초 쥐기 때문입니다.
+mod 는 30초마다 `vmq status --json` · `claude agents --json --all` · `reservations.tsv` 를 읽어 차례마다 세션 이름 · 프로젝트 · 판정을 붙입니다. 큐는 바꾸지 않습니다. 두 명령의 stdout 은 `$VMQ_CACHE/status.json` 에 25초 동안 캐시해 세션들이 함께 씁니다. `vmq status` 가 큐 잠금을 약 2초 쥐기 때문입니다.
 
 | 자리 | 보이는 것 |
 |---|---|

@@ -1,4 +1,4 @@
-# vmq target list. Copy to ~/Library/Application Support/vmq/resources.tsv (or set VMQ_REGISTRY) and edit.
+# vmq target list. Add targets with vmq target add (README "Targets"); this file shows the format.
 # One target per line, tab-separated: <name>	<SSH address of the Mac the target is on>	<roles, comma-separated>	<operating system>
 # The operating system is the one running inside the target (macOS, Windows, Linux), or - for a target with none (a build slot).
 # A role names a group of targets: `vmq acquire @server` takes whichever target with role server is free first.

@@ -14,7 +14,7 @@ The vmq mod opens it when a session starts and none is live (option `autoStartMa
 |---|---|---|
 | Session name | `vmq-main` | Other sessions' SendMessage and the mod's verdict prompts reach this session by name. With another name neither reaches it |
 | Permission mode | `bypassPermissions` | A message from a session in another permission mode waits for the user's approval before this session reads it (SendMessage tool description). Sessions that drive targets usually run unattended |
-| Working folder | `$VMQ_DATA` (default `~/Library/Application Support/vmq`) | The queue log and `reservations.tsv` are there |
+| Working folder | `$VMQ_DATA` (`vmq paths` prints it) | The queue log and `reservations.tsv` are there |
 | Number of sessions | One | With two of one name, other sessions cannot send by name, and the mod would prompt both. The mod gives the later one a warning in place of this role |
 
 ## Requests it takes

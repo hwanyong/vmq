@@ -4,7 +4,7 @@
 # When `claude agents --json` lists a live session (one with a pid) named vmq-main, this does not open another. Without
 # --if-absent it writes that session's id (what claude attach and claude stop take for a background session, else -), session
 # id, pid, status and cwd to stderr and exits 1; with --if-absent it exits 0 and prints nothing (the vmq mod starts it this way).
-# Otherwise it opens a background session in the vmq data folder ($VMQ_DATA, default ~/Library/Application Support/vmq),
+# Otherwise it opens a background session in the vmq data folder ($VMQ_DATA, lib/paths.zsh),
 # prints claude --bg's output (the session id) and waits until the session is listed.
 # Several sessions can start at once and each run this. The check and the open happen under one lock ($VMQ_DATA/.vmq-main.lock,
 # a directory: mkdir is atomic on a local disk), held until the new session is listed, so only one session is opened. A lock

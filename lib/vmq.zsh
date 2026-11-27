@@ -49,7 +49,7 @@ zmodload zsh/datetime
 zmodload -F zsh/stat b:zstat
 
 VMQ_ROOT=${${(%):-%x}:A:h:h}
-VMQ_DATA=${VMQ_DATA:-$HOME/Library/Application Support/vmq}
+source "$VMQ_ROOT/lib/paths.zsh"
 VMQ_REGISTRY=${VMQ_REGISTRY:-$VMQ_DATA/resources.tsv}
 VMQ_DIR=${VM_QUEUE_DIR:-$VMQ_DATA/queue}
 VMQ_LEASE=${VM_QUEUE_LEASE:-1200}
@@ -78,7 +78,7 @@ vmq_load_registry
 # ssh options for a Mac: vmq_ssh_opts <identity address> → reply. The identity address (second column of resources.tsv) stays
 # the ssh destination, and the options this function returns go before it: `vmq_ssh_opts $h; ssh "${reply[@]}" $h …`.
 # reply always starts with VMQ_SSH_BASE (below). Then the addresses in hosts.tsv are tried in order, 2 seconds each
-# (nc -z -G 2 <address> 22). When the address that answers is the identity address, nothing is added; when it is another one,
+# (vmq_port_open <address>). When the address that answers is the identity address, nothing is added; when it is another one,
 # -o HostName=<that address> -o HostKeyAlias=<identity address> is added so the same host key is checked. When none answers,
 # the exit code is 1 (ssh then reports that failure itself). An identity address not in hosts.tsv gets VMQ_SSH_BASE alone.
 # This is for a Mac reachable on several networks (a direct link and the LAN): when the first link is down, the next one is used.
@@ -89,6 +89,15 @@ vmq_load_registry
 # guest VM uses this array as it is.
 typeset -ga VMQ_SSH_BASE=(-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
 VMQ_HOSTS_FILE=${VMQ_HOSTS_FILE:-$VMQ_DATA/hosts.tsv}
+# Whether TCP port 22 of an address accepts a connection within 2 seconds: vmq_port_open <address> → 0 or 1.
+# macOS nc takes the connect timeout as -G (its -w is the idle timeout); the OpenBSD nc of Linux distributions (netcat-openbsd)
+# takes it as -w. Without nc, zsh's own TCP module under coreutils timeout is used.
+vmq_port_open() {
+  if [[ $OSTYPE == darwin* ]]; then nc -z -G 2 $1 22 >/dev/null 2>&1
+  elif (( $+commands[nc] )); then nc -z -w 2 $1 22 >/dev/null 2>&1
+  else timeout 2 zsh -c 'zmodload zsh/net/tcp && ztcp $1 22 && ztcp -c' zsh $1 >/dev/null 2>&1
+  fi
+}
 vmq_ssh_opts() {
   local id=$1 key addrs a
   reply=($VMQ_SSH_BASE)
@@ -99,7 +108,7 @@ vmq_ssh_opts() {
   done < "$VMQ_HOSTS_FILE"
   [[ -n $addrs ]] || return 0
   for a in ${=addrs}; do
-    nc -z -G 2 $a 22 >/dev/null 2>&1 || continue
+    vmq_port_open $a || continue
     [[ $a == $id ]] || reply+=(-o "HostName=$a" -o "HostKeyAlias=$id")
     return 0
   done
@@ -129,7 +138,7 @@ vmq_ssh_retry() {
   local name=$1 prep=$2 rc n=0 t0=$EPOCHREALTIME msg
   shift 2
   local -x VMQ_SSH_ERR
-  VMQ_SSH_ERR=$(mktemp -t vmq-ssh) || return 255
+  VMQ_SSH_ERR=$(mktemp "${TMPDIR:-/tmp}/vmq-ssh.XXXXXX") || return 255
   while :; do
     (( ++n ))
     $prep "$@"

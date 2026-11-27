@@ -39,8 +39,11 @@ export type Snapshot = {
   error: string
 }
 
+// Where this host keeps reservations.tsv and the mod's shared read cache (from `vmq paths --json`, lib/paths.zsh).
+export type DataPaths = { rules: string; cache: string }
+
 declare module 'claude-code' {
   interface PluginState {
-    'vmq': { snapshot: Shaped<Snapshot> }
+    'vmq': { snapshot: Shaped<Snapshot>; paths: Shaped<DataPaths> }
   }
 }

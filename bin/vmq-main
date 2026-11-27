@@ -17,7 +17,8 @@ zmodload zsh/datetime
 zmodload -F zsh/stat b:zstat
 
 readonly name=vmq-main
-readonly data=${VMQ_DATA:-$HOME/Library/Application Support/vmq}
+source "${0:A:h:h}/lib/paths.zsh"
+readonly data=$VMQ_DATA
 readonly lock=$data/.vmq-main.lock
 if_absent=0; [[ ${1:-} == --if-absent ]] && if_absent=1
 

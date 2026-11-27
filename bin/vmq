@@ -27,6 +27,7 @@
 #                                                The command gets the targets in VM_QUEUE_GRANTED (space-separated)
 #   vmq force-release <target>                   Removes the turn that holds that target. Only when the user says so
 #   vmq list                                     The target list (name, Mac, roles, operating system)
+#   vmq paths [--json]                           The data folder, target list, queue and cache folder in use (lib/paths.zsh)
 #   vmq init                                     Creates the data folder and an empty target list ($VMQ_REGISTRY) when absent
 #   vmq target add <name> <mac> <roles> <os>     Adds a target to the target list. <mac> is the SSH address of the Mac the
 #                                                target is on (any name for this Mac, such as localhost; targets with the same
@@ -43,7 +44,7 @@
 set -uo pipefail
 cmd=${1:-status}; (( $# )) && shift
 # init and target work before a target list exists
-[[ $cmd == (init|target) ]] && VMQ_REGISTRY_OPTIONAL=1
+[[ $cmd == (init|target|paths) ]] && VMQ_REGISTRY_OPTIONAL=1
 source "${0:A:h:h}/lib/vmq.zsh"
 
 # This script's path. Inside a function $0 is the function name (zsh FUNCTION_ARGZERO), so it is taken here
@@ -253,6 +254,15 @@ peek-check)
   # Only judges whether a read may run without a turn (lib/peek.zsh)
   source "${0:A:h:h}/lib/peek.zsh"
   peek_allowed "$*" && print "read: may run without a turn"
+  ;;
+paths)
+  # For the mod and for people: where this host keeps vmq's files. jq builds the JSON so any path is quoted right
+  if [[ ${1:-} == --json ]]; then
+    jq -n --arg data "$VMQ_DATA" --arg registry "$VMQ_REGISTRY" --arg queue "$VMQ_DIR" --arg hosts "$VMQ_HOSTS_FILE" --arg cache "$VMQ_CACHE" \
+      '{data: $data, registry: $registry, queue: $queue, hosts: $hosts, cache: $cache}'
+  else
+    print -l -- "data	$VMQ_DATA" "registry	$VMQ_REGISTRY" "queue	$VMQ_DIR" "hosts	$VMQ_HOSTS_FILE" "cache	$VMQ_CACHE"
+  fi
   ;;
 list)
   # The target list (VMQ_REGISTRY)

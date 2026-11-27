@@ -1,0 +1,33 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  zsh:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zsh and jq
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q zsh jq
+      - name: Syntax
+        run: for f in bin/vmq bin/vmq-main bin/vmq-ssh-e lib/*.zsh tests/*.zsh; do zsh -n "$f" || exit 1; done
+      - name: Read check (tests/peek.zsh)
+        run: zsh tests/peek.zsh
+      - name: Target list (tests/targets.zsh)
+        run: zsh tests/targets.zsh bin/vmq "$RUNNER_TEMP/targets"
+      - name: Owners at once (tests/stress.zsh)
+        run: zsh tests/stress.zsh bin/vmq "$RUNNER_TEMP/stress" "$RUNNER_TEMP/stress.out"
+      - name: Server and client pairs (tests/pair.zsh)
+        run: zsh tests/pair.zsh bin/vmq "$RUNNER_TEMP/pair"
+      - name: Holding process and expiry (tests/keepalive.zsh)
+        run: zsh tests/keepalive.zsh bin/vmq "$RUNNER_TEMP/keepalive"
+      - name: vmq run and signals (tests/run-signal.zsh)
+        run: zsh tests/run-signal.zsh bin/vmq "$RUNNER_TEMP/run-signal"

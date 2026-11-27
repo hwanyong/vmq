@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, StateWrite } from 'claude-code'
 
-import type { Flag, Row, Snapshot } from '../types'
+import type { DataPaths, Flag, Row, Snapshot } from '../types'
 import { buildSnapshot, countOf, flagEntries, parseAgents, roleOf } from './model'
 import { fillSlot, offerChoice, placementIn, readPlacement } from './pane-grid'
 
@@ -22,24 +22,20 @@ const ROLE_SECTION = 'vmq:main-role'
 const EMPTY: Snapshot = { at: 0, targets: 0, rows: [], ended: [], badLines: 0, flagged: [], error: '' }
 // When the fields of Snapshot change, change shape. Values a former version stored stay across a reload.
 const snapshot = atom({ plugin: 'vmq', key: 'snapshot' } as const, EMPTY, { shape: 'snapshot-5' })
+// Empty strings until the first read of `vmq paths --json` in this session.
+const NO_PATHS: DataPaths = { rules: '', cache: '' }
+const dataPaths = atom({ plugin: 'vmq', key: 'paths' } as const, NO_PATHS, { shape: 'paths-1' })
 
 type Resolvable = Parameters<EngineInterface['ui']['resolve']>[0]
 type Raw = { status: string; agents: string }
 type Options = { autoStartMain?: boolean }
 
-// The CLI ships in this plugin (bin/ is also on the Bash tool's PATH). The data folder holds the target list, the queue and
-// reservations.tsv; VMQ_DATA moves it, as in lib/vmq.zsh.
-const pathsOf = async ($: EngineInterface) => {
-  const home = (await $.env.get('HOME')) ?? ''
-  const data = (await $.env.get('VMQ_DATA')) || `${home}/Library/Application Support/vmq`
-  return {
-    vmq: `${$.plugin.root}/bin/vmq`,
-    main: `${$.plugin.root}/bin/vmq-main`,
-    role: `${$.plugin.root}/VMQ-MAIN.md`,
-    cache: `${home}/Library/Caches/vmq/status.json`,
-    rules: `${data}/reservations.tsv`,
-  }
-}
+// The CLI ships in this plugin (bin/ is also on the Bash tool's PATH).
+const filesOf = ($: EngineInterface) => ({
+  vmq: `${$.plugin.root}/bin/vmq`,
+  main: `${$.plugin.root}/bin/vmq-main`,
+  role: `${$.plugin.root}/VMQ-MAIN.md`,
+})
 
 const firstLine = (text: string) => text.trim().split('\n')[0] ?? ''
 
@@ -71,11 +67,22 @@ const run = async ($: EngineInterface, argv: string[], timeoutMs = RUN_MS): Prom
   return stdout
 }
 
+// The data and cache folders differ per host operating system and VMQ_DATA moves them. lib/paths.zsh holds those defaults,
+// so they are read from `vmq paths --json` once per session and kept in $.state.
+const dataPathsOf = async ($: EngineInterface): Promise<DataPaths> => {
+  const known = await read($, dataPaths)
+  if (known.cache != '') return known
+  const out = JSON.parse(await run($, [filesOf($).vmq, 'paths', '--json'])) as { data: string; cache: string }
+  const found = { rules: `${out.data}/reservations.tsv`, cache: `${out.cache}/status.json` }
+  await update($, dataPaths, () => found)
+  return found
+}
+
 const readRaw = async ($: EngineInterface): Promise<Raw> => {
-  const paths = await pathsOf($)
+  const paths = await dataPathsOf($)
   const cached = await readCache($, paths.cache)
   if (cached) return cached
-  const status = await run($, [paths.vmq, 'status', '--json'])
+  const status = await run($, [filesOf($).vmq, 'status', '--json'])
   const agents = await run($, ['claude', 'agents', '--json', '--all'])
   await $.fs.write(paths.cache, JSON.stringify({ status, agents }))
   return { status, agents }
@@ -137,8 +144,9 @@ type Polling = { hasSucceeded: boolean }
 const poll = async ($: EngineInterface, polling: Polling) => {
   const at = await $.clock.now()
   const previous = await read($, snapshot)
-  const paths = await pathsOf($)
-  const rulesText = (await $.fs.exists(paths.rules)) ? await $.fs.read(paths.rules) : ''
+  const paths = await dataPathsOf($).catch(() => NO_PATHS)
+  // When vmq paths fails, load below reads it again and reports that failure in snapshot.error
+  const rulesText = paths.rules != '' && (await $.fs.exists(paths.rules)) ? await $.fs.read(paths.rules) : ''
   const loaded = await load($, rulesText, at)
   if ('error' in loaded) {
     const failed = { ...previous, at, error: loaded.error }
@@ -168,8 +176,7 @@ const startMain = async ($: EngineInterface) => {
   if ((JSON.parse(raw.status) as { targets: unknown[] }).targets.length == 0) return
   const agents = parseAgents(raw.agents)
   if (agents.some(one => one.name == CONTROL_SESSION && one.pid != null)) return
-  const paths = await pathsOf($)
-  const { exitCode, stderr } = await $.process.run([paths.main, '--if-absent'], { timeoutMs: START_MS })
+  const { exitCode, stderr } = await $.process.run([filesOf($).main, '--if-absent'], { timeoutMs: START_MS })
   if (exitCode != 0) $.ui.toast(oneLine(`vmq: could not start vmq-main: ${firstLine(stderr)}`), { timeoutMs: 8000 })
 }
 
@@ -184,7 +191,7 @@ const roleSection = async ($: EngineInterface) => {
   const agents = cached.some(one => one.pid == pid) ? cached : parseAgents(await run($, ['claude', 'agents', '--json', '--all']))
   const role = roleOf(agents, pid, CONTROL_SESSION)
   if (role == undefined) return undefined
-  if (role.kind == 'role') return (await $.fs.read((await pathsOf($)).role))
+  if (role.kind == 'role') return (await $.fs.read(filesOf($).role))
   return [
     `# vmq-main: duplicate session`,
     `Another live session named ${CONTROL_SESSION} started before this one (pid ${role.earlier.pid}, session ${role.earlier.sessionId}).`,
@@ -304,7 +311,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'vmq-main' }, async $ => {
-    const { exitCode, stdout, stderr } = await $.process.run([(await pathsOf($)).main], { timeoutMs: START_MS })
+    const { exitCode, stdout, stderr } = await $.process.run([filesOf($).main], { timeoutMs: START_MS })
     return { text: exitCode == 0 ? `Opened vmq-main: ${firstLine(stdout)}` : oneLine(stderr.trim()) }
   })
 

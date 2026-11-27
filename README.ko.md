@@ -76,6 +76,14 @@ vmq target add Build2 localhost build -
 vmq run @build -- make
 ```
 
+시뮬레이터는 그것이 도는 Mac 의 데스크톱과 별개인 대상입니다. 창 없이 다루는 작업(`xcrun simctl` 의 boot · install · launch · screenshot)은 시뮬레이터만 받습니다. Simulator.app 으로 창을 띄우는 작업은 그 Mac 의 데스크톱도 함께 받습니다. 그 창이 다른 세션이 다루고 있을 수 있는 데스크톱에 그려지기 때문입니다. 운영체제 값에 iOS 가 없으므로 시뮬레이터의 넷째 값은 `-` 입니다.
+
+```sh
+vmq target add iPhone16 localhost simulator -
+vmq acquire iPhone16                # simctl 만
+vmq acquire iPhone16+Desktop        # Simulator.app 창을 띄울 때
+```
+
 `hosts.tsv`(선택, 같은 폴더)는 Mac 하나의 주소를 여러 개 적어 앞부터 시도합니다. 직결 링크와 LAN 양쪽으로 접속되는 Mac 에 씁니다. 형식은 `examples/hosts.tsv` 입니다.
 
 ## 설정

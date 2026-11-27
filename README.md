@@ -76,6 +76,14 @@ vmq target add Build2 localhost build -
 vmq run @build -- make
 ```
 
+A simulator is a target of its own, separate from the desktop of the Mac it runs on. Work that drives it without a window (`xcrun simctl`: boot, install, launch, screenshot) takes only the simulator. Work that opens its window in Simulator.app also takes that Mac's desktop, because the window is drawn on a desktop other sessions may be driving. The operating system value has no iOS, so a simulator takes `-`:
+
+```sh
+vmq target add iPhone16 localhost simulator -
+vmq acquire iPhone16                # simctl only
+vmq acquire iPhone16+Desktop        # with the Simulator.app window
+```
+
 `hosts.tsv` (optional, same folder) lists more addresses for a Mac, tried in order, for a Mac reachable on a direct link and on the LAN. See `examples/hosts.tsv`.
 
 ## Settings

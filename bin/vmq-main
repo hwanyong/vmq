@@ -1,26 +1,59 @@
 #!/bin/zsh
-# 세션 vmq-main 을 연다(역할은 VMQ-MAIN.md, 여는 값은 그 문서 「여는 법」 표).
-# 이름이 vmq-main 이고 pid 가 있는 세션이 claude agents --json 에 있으면 열지 않고, 그 세션의 id(background 세션이면 claude attach ·
-# stop 이 받는 값, 아니면 -) · session id · pid · status · cwd 를 stderr 에 쓰고 종료 코드 1.
-# 없으면 ~/.claude/tools/vmq 에서 background 세션을 열고 claude --bg 의 출력(세션 id)을 그대로 찍는다. 어느 사본(worktree)의 이 명령을
-# 실행해도 cwd 는 main 체크아웃이다. 역할 지시문은 이 명령이 아니라 SessionStart 훅 .claude/hooks/vmq-main-start.zsh 가 넣는다.
-# 그래서 /clear 뒤에도 남는다.
-# 종료 코드: 0 열었음, 1 이미 있음 · claude · jq 실패.
+# Opens the session vmq-main: vmq-main [--if-absent]. Its role is VMQ-MAIN.md; why each value below is set is in that file's
+# "Opening it" table.
+# When `claude agents --json` lists a live session (one with a pid) named vmq-main, this does not open another. Without
+# --if-absent it writes that session's id (what claude attach and claude stop take for a background session, else -), session
+# id, pid, status and cwd to stderr and exits 1; with --if-absent it exits 0 and prints nothing (the vmq mod starts it this way).
+# Otherwise it opens a background session in the vmq data folder ($VMQ_DATA, default ~/Library/Application Support/vmq),
+# prints claude --bg's output (the session id) and waits until the session is listed.
+# Several sessions can start at once and each run this. The check and the open happen under one lock ($VMQ_DATA/.vmq-main.lock,
+# a directory: mkdir is atomic on a local disk), held until the new session is listed, so only one session is opened. A lock
+# older than 60 seconds is taken as left by an ended process.
+# The role text is not given here: the vmq mod adds VMQ-MAIN.md to the system prompt of the session named vmq-main
+# (hooks/register.tsx), so it stays after /clear and compact.
+# Exit codes: 0 opened (or already open with --if-absent), 1 already open, lock not obtained, or claude or jq failed.
 set -uo pipefail
+zmodload zsh/datetime
+zmodload -F zsh/stat b:zstat
 
 readonly name=vmq-main
-readonly repo=$HOME/.claude/tools/vmq
+readonly data=${VMQ_DATA:-$HOME/Library/Application Support/vmq}
+readonly lock=$data/.vmq-main.lock
+if_absent=0; [[ ${1:-} == --if-absent ]] && if_absent=1
 
-agents=$(claude agents --json) || { print -u2 -- "vmq-main: claude agents --json 실패"; exit 1 }
-running=$(print -r -- "$agents" | jq -r --arg name $name \
-  '.[] | select(.name == $name and .pid != null) | "id \(.id // "-") · session \(.sessionId) · pid \(.pid) · \(.status // "-") · \(.cwd)"') \
-  || { print -u2 -- "vmq-main: claude agents --json 의 출력을 jq 로 읽지 못했다"; exit 1 }
-if [[ -n $running ]]; then
-  print -u2 -- "vmq-main: 이미 있다. 새로 열지 않는다"
-  print -u2 -r -- "$running"
+# Live sessions named vmq-main, one line each, or nothing
+running() {
+  local agents
+  agents=$(claude agents --json) || { print -u2 -- "vmq-main: claude agents --json failed"; return 1 }
+  print -r -- "$agents" | jq -r --arg name $name \
+    '.[] | select(.name == $name and .pid != null) | "id \(.id // "-") · session \(.sessionId) · pid \(.pid) · \(.status // "-") · \(.cwd)"' \
+    || { print -u2 -- "vmq-main: could not read the output of claude agents --json with jq"; return 1 }
+}
+
+mkdir -p "$data" || exit 1
+i=0
+until mkdir "$lock" 2>/dev/null; do
+  if (( EPOCHSECONDS - $(zstat +mtime -- "$lock" 2>/dev/null || print $EPOCHSECONDS) > 60 )); then rmdir "$lock" 2>/dev/null; continue; fi
+  sleep 0.2
+  (( ++i < 300 )) || { print -u2 -- "vmq-main: could not get the lock ($lock)"; exit 1 }
+done
+# exit inside `{ } always { }` does not run the always block in zsh, so the lock is released by an EXIT trap
+trap 'rmdir "$lock" 2>/dev/null' EXIT
+found=$(running) || exit 1
+if [[ -n $found ]]; then
+  (( if_absent )) && exit 0
+  print -u2 -- "vmq-main: already open, not opening another"
+  print -u2 -r -- "$found"
   exit 1
 fi
-
-cd $repo || exit 1
-exec claude --bg -n $name --permission-mode bypassPermissions \
-  "VMQ-MAIN.md 의 「시작하면」 절을 따른다. 그 문서가 문맥에 없으면 SessionStart 훅이 돌지 않은 것이므로 역할을 맡지 말고 사용자에게 알린다."
+cd "$data" || exit 1
+claude --bg -n $name --permission-mode bypassPermissions \
+  "Follow the \"On start\" section of the vmq-main role in your system prompt. If your system prompt has no vmq-main role section, the vmq plugin is not loaded: do not take the role, and tell the user." \
+  || { print -u2 -- "vmq-main: claude --bg failed"; exit 1 }
+# Hold the lock until the new session is listed, so a run started meanwhile sees it
+for i in {1..60}; do
+  [[ -n $(running 2>/dev/null) ]] && exit 0
+  sleep 0.5
+done
+print -u2 -- "vmq-main: the session was started but is not listed by claude agents --json after 30 s"
+exit 1

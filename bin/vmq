@@ -1,82 +1,96 @@
 #!/bin/zsh
-# 제어 대상 큐(전역 규약 §18, ~/.claude/tools/vmq/README.md, 규칙 · 차례 파일 · 배정은 lib/vmq.zsh). 대상을 다루기 전에 차례를 받고,
-# 끝나면 놓는다. 차례가 없으면 그 대상을 다루는 프로젝트 도구(예: poieve 의 tools/vm.sh · tools/vm-ui.sh)가 거절한다.
-# 사용:
-#   vmq acquire [-w 초] [-l 설명] <묶음>…   차례를 받는다. 묶음마다 후보 하나를 받는다. 묶음은 VM 이름, 쉼표로 적은 후보
-#                                                      (PoieveServer,PoieveServer2), 역할(@server · @client) 중 하나다. 후보 중 먼저 비는
-#                                                      것을 받는다. 후보는 + 로 이은 VM 여럿일 수 있고(PoieveServer2+PoieveClient2), 그 VM 이
-#                                                      모두 빌 때 함께 받는다. @server+@client 는 같은 Mac 의 서버 · 클라이언트 짝들이다. 다른 소유자가 잡고 있으면 기다린다(기본 90초). 잡으면 종료 코드 0 이고
-#                                                      받은 VM 을 묶음 순서로 찍는다. 기다리다 시간이 다 되면 75 이고 차례는 남는다(같은
-#                                                      명령을 다시 실행해 이어서 기다린다). -w 는 이 명령 전체의 기한이다(끝난 사슬의 차례가
-#                                                      없어지기를 기다리는 시간과 잡기를 기다리는 시간을 합친다, 0 이면 끝없이). 기다리는 중에
-#                                                      다른 묶음으로 다시 실행하면 같은 순번으로 요청을 바꾼다
-#   vmq mine                             내가 잡은 VM 을 묶음 순서로 한 줄에 찍는다. 잡지 않았으면 종료 코드 1
-#   vmq ticket                           내 차례의 키(<10자리 일련번호>-<소유자>, 잡았든 기다리든)를 한 줄로 찍는다. 없으면 종료 코드 1
-#   vmq release [<vm>…]                  내 차례를 지운다. VM 을 주면 그 VM 만 놓는다
-#   vmq status [<vm>…]                   VM 마다 잡은 소유자와 기다리는 소유자
-#   vmq status --json [<vm>…]            같은 판정을 요청(차례) 단위 JSON 한 개로 찍는다. 형식은 README.md 「status --json」
-#   vmq ended <vm>                       내 그 VM 차례가 마지막에 끝난 사건(놓음 · 만료 · 강제로놓음) · 시각 · 그 뒤 잡은 다른 소유자(없으면 -)
-#   vmq run [-l 설명] <묶음>… -- <명령…>  차례를 잡을 때까지 기다린 뒤 명령을 실행하고, 이 명령이 받은 차례면 놓는다.
-#                                                      TERM · INT · HUP 으로 끝나도 놓는다(명령이 돌던 중이면 그 명령이 끝난 뒤). KILL 은 LEASE 로 만료된다.
-#                                                      명령에는 받은 VM 이 환경 변수 VM_QUEUE_GRANTED(공백으로 나눈 목록)로 간다
-#   vmq force-release <vm>              그 VM 을 잡은 차례를 지운다. 사용자가 지시할 때만 쓴다
-#   vmq list                            대상 목록(이름 · Mac · 역할)
-#   vmq peek-check '<명령 한 줄>'        차례 없이 실행해도 되는 읽기인지 판별한다(종료 코드 0 · 1)
-# 소유자는 VM_QUEUE_OWNER, 없으면 CLAUDE_CODE_SESSION_ID, 둘 다 없는 Doghoodie 탭이면 그 탭을 연 세션의 id(lib/vmq.zsh 의
-# vmq_owner_doghoodie). 설명은 -l 또는 VM_QUEUE_LABEL.
-# 차례 고정: VM_QUEUE_TICKET=<키>(vmq ticket 이 찍은 값)를 주면 mine · release(와 lib/vmq.zsh 의 vmq_require · vmq_keepalive · vmq_chain_of ·
-# vmq_chain_mark)는 그 키가 내 지금 차례일 때만 동작하고, 아니면 아무것도 하지 않고 stderr 에 고정한 키 · 지금 키를 쓰고 종료 코드 1.
-# 다른 명령은 이 값을 보지 않는다(run 은 지운 뒤 명령을 실행한다).
-# 종료 코드: 0 성공, 1 거절 · 오류, 2 사용법, 75 기다리는 중.
+# vmq: the control queue for targets several sessions share (README.md; rules, turn files and assignment are in lib/vmq.zsh).
+# Take a turn before driving a target and release it when done. A project's tool that drives the target refuses without a turn.
+# Usage:
+#   vmq acquire [-w seconds] [-l label] <group>…  Takes a turn: one candidate per group. A group is a target name,
+#                                                comma-separated candidates (Server1,Server2) or a role (@server).
+#                                                The candidate free first is taken. A candidate can be targets joined with
+#                                                + (Server2+Client2), taken when all are free. @server+@client is a server
+#                                                and a client on the same Mac. Waits while another owner holds it (default
+#                                                90 s). On success exits 0 and prints the targets in group order. On timeout
+#                                                exits 75 and the request stays (run the same command again to keep
+#                                                waiting). -w is the deadline of the whole command (waiting for an ended
+#                                                chain's turn to go plus waiting to take; 0 waits forever). Running again
+#                                                with other groups while waiting changes the request under the same number
+#   vmq mine                                     Prints the targets I hold, in group order, on one line. Exit 1 when none
+#   vmq ticket                                   Prints my turn key (<10-digit sequence>-<owner>, held or waiting). Exit 1
+#                                                when none
+#   vmq release [<target>…]                      Removes my turn. With targets, releases only those
+#   vmq status [<target>…]                       The holder and the waiting owners of each target
+#   vmq status --json [<target>…]                The same judgement as one JSON value per request (turn). Format: README.md
+#                                                "status --json"
+#   vmq ended <target>                           How my last turn on that target ended (released, expired, force-released),
+#                                                when, and the other owner that took it afterwards (- for none)
+#   vmq run [-l label] <group>… -- <command…>     Waits until the turn is taken, runs the command, then releases the turn
+#                                                if this command took it. Also releases on TERM, INT and HUP (after the
+#                                                command ends, when it was running). After KILL the turn expires by LEASE.
+#                                                The command gets the targets in VM_QUEUE_GRANTED (space-separated)
+#   vmq force-release <target>                   Removes the turn that holds that target. Only when the user says so
+#   vmq list                                     The target list (name, Mac, roles, operating system)
+#   vmq init                                     Creates the data folder and an empty target list ($VMQ_REGISTRY) when absent
+#   vmq target add <name> <mac> <roles> <os>     Adds a target to the target list. <mac> is the SSH address of the Mac the
+#                                                target is on (any name for this Mac, such as localhost; targets with the same
+#                                                value are on the same Mac). <roles> is comma-separated (- for none). <os> is
+#                                                macOS, Windows, Linux or - (none, such as a build slot)
+#   vmq target remove <name>                     Removes a target no turn holds or waits for
+#   vmq peek-check '<one command line>'          Whether a read may run without a turn (exit 0 or 1)
+# Owner: VM_QUEUE_OWNER, else CLAUDE_CODE_SESSION_ID, else in a Doghoodie tab the id of the session that opened it
+# (vmq_owner_doghoodie in lib/vmq.zsh). Label: -l or VM_QUEUE_LABEL.
+# Pinning a turn: with VM_QUEUE_TICKET=<key> (as vmq ticket printed it), mine and release (and vmq_require, vmq_keepalive,
+# vmq_chain_of and vmq_chain_mark in lib/vmq.zsh) act only when that key is my current turn; otherwise they do nothing, write the
+# pinned and current keys to stderr and exit 1. Other commands ignore it (run removes it before running the command).
+# Exit codes: 0 success, 1 refused or error, 2 usage, 75 waiting.
 set -uo pipefail
-source "${0:A:h:h}/lib/vmq.zsh"
 cmd=${1:-status}; (( $# )) && shift
+# init and target work before a target list exists
+[[ $cmd == (init|target) ]] && VMQ_REGISTRY_OPTIONAL=1
+source "${0:A:h:h}/lib/vmq.zsh"
 
-# 이 스크립트의 경로. 함수 안의 $0 은 함수 이름이라(zsh FUNCTION_ARGZERO) 여기서 받아 둔다. 전에는 usage 가 함수 안의 $0 을 써
-# 사용법 대신 「sed: …/usage: No such file or directory」 를 냈다
+# This script's path. Inside a function $0 is the function name (zsh FUNCTION_ARGZERO), so it is taken here
 self=${0:A}
-# 사용법은 이 파일의 머리 주석(둘째 줄부터 # 이 아닌 첫 줄 앞까지)이다
+# The usage is this file's head comment (from the second line to before the first line not starting with #)
 usage() { sed -n '2,/^[^#]/{/^#/p;}' "$self"; exit 2 }
 
-# VM_QUEUE_TICKET(고정할 차례 키)은 mine · release 만 본다(lib/vmq.zsh 의 vmq_sync · vmq_ticket_ok). 나머지 명령은 지운다: acquire · run 의
-# register · hold 가 부르는 vmq_sync 가 그 값으로 거절하지 않게, run 은 자기 차례를 놓는 run_release(vmq release)가 바깥에서 물려받은 값으로
-# 거절되지 않고 명령에도 물려지지 않게, ticket 은 고정할 키를 새로 읽을 때 앞의 값과 상관없이 읽게.
+# Only mine and release read VM_QUEUE_TICKET (vmq_sync and vmq_ticket_ok in lib/vmq.zsh). Other commands unset it: so the
+# vmq_sync called by register and hold in acquire and run does not refuse on it, so run's own release (run_release, vmq release)
+# is not refused by an inherited value and the command does not inherit it, and so ticket reads the key afresh.
 [[ $cmd == (mine|release) ]] || unset VM_QUEUE_TICKET
 
-# 옵션: -w 초 · -l 설명. 나머지는 reply 에 남는다.
+# Options: -w seconds and -l label. The rest stays in reply.
 wait_s=90 label=${VM_QUEUE_LABEL:-}
 parse() {
   reply=()
   while (( $# )); do
     case $1 in
-    -w) wait_s=${2:?초}; shift 2 ;;
-    -l) label=${2:?설명}; shift 2 ;;
+    -w) wait_s=${2:?seconds}; shift 2 ;;
+    -l) label=${2:?label}; shift 2 ;;
     --) reply+=("$@"); return ;;
     *) reply+=("$1"); shift ;;
     esac
   done
 }
 
-# 묶음들을 풀어 groups 에 둔다: expand_groups <묶음>…
+# Expands the groups into groups: expand_groups <group>…
 expand_groups() {
   local g e
   groups=()
   for g in "$@"; do e=$(vmq_expand $g) || return 1; groups+=($e); done
 }
 
-# JSON 문자열 하나: json_str <값> → REPLY. 역슬래시 · 따옴표 · 줄바꿈 · 탭 · CR 을 이스케이프하고 남은 제어 문자는 지운다
+# One JSON string: json_str <value> → REPLY. Escapes backslash, quote, newline, tab and CR, and removes other control characters
 json_str() {
   local s=$1
   s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\t'/\\t}; s=${s//$'\r'/\\r}; s=${s//[[:cntrl:]]/}
   REPLY="\"$s\""
 }
-# JSON 문자열 배열: json_arr <값>… → REPLY
+# A JSON string array: json_arr <value>… → REPLY
 json_arr() { local x out=(); for x in "$@"; do json_str "$x"; out+=($REPLY); done; REPLY="[${(j:,:)out}]" }
-# 빈 값은 null: json_opt <값> → REPLY
+# null for an empty value: json_opt <value> → REPLY
 json_opt() { [[ -n $1 ]] && json_str "$1" || REPLY=null }
 
-# vmq status --json 의 본문(잠금 안에서 vmq_purge · vmq_scan · vmq_plan 을 마친 뒤). 대상은 $vms, 이 세션의 소유자는 $me.
-# 대상마다 한 개와 차례(요청)마다 한 개를 낸다. 차례는 $vms 의 대상에 파일이 있는 것만 낸다. 만료 판정은 lib/vmq.zsh 의 vmq_key_expiry(차례 단위)다.
+# The body of vmq status --json (after vmq_purge, vmq_scan and vmq_plan under the lock). Targets are $vms, this session's owner
+# is $me. One value per target and one per turn (request). Only turns with a file on a target in $vms are included. Expiry is
+# judged per turn by vmq_key_expiry in lib/vmq.zsh.
 status_json() {
   local vm k f hk busy o waiting tv targets=() requests=() fields
   for vm in $vms; do
@@ -89,7 +103,7 @@ status_json() {
     json_arr ${=VMQ_ROLES[$vm]:-}; fields+=("\"roles\":$REPLY")
     json_opt "${VMQ_OS[$vm]:#-}"; fields+=("\"os\":$REPLY")
     json_opt "$hk"; fields+=("\"holder\":$REPLY")
-    # 배정됨: 기다리던 차례가 다음 확인에서 잡을 대상. 맡아 둠: VMQ_STARVE 가 지난 차례가 맡아 둔 대상(vmq_plan 의 「~」)
+    # assigned: the waiting turn that takes the target at its next check. reserved: the turn past VMQ_STARVE that reserves it (vmq_plan's "~")
     [[ -n $busy && $busy != "~"* && $busy != $hk ]] && json_str "$busy" || REPLY=null; fields+=("\"assigned\":$REPLY")
     [[ $busy == "~"* ]] && json_str "${busy#\~}" || REPLY=null; fields+=("\"reserved\":$REPLY")
     json_arr $waiting; fields+=("\"waiting\":$REPLY")
@@ -117,7 +131,7 @@ status_json() {
   print -r -- "{\"version\":1,\"now\":$EPOCHSECONDS,\"lease\":$VMQ_LEASE,\"holdMax\":$VMQ_HOLD_MAX,\"starve\":$VMQ_STARVE,\"owner\":$REPLY,\"targets\":[${(j:,:)targets}],\"requests\":[${(j:,:)requests}]}"
 }
 
-# 잡은 VM 으로 묶음들을 채울 수 있는가: covers <잡은 VM 목록> <묶음>…. 후보의 VM(+ 로 이은 것)이 모두 잡은 것에 있어야 한다.
+# Can the held targets fill the groups: covers <held targets> <group>…. Every target of a candidate (joined with +) must be held.
 covers() {
   local held=$1 g c vm used=() hit ok; shift
   for g in "$@"; do
@@ -132,14 +146,14 @@ covers() {
   done
 }
 
-# 차례를 만들거나 바꾼다: register <소유자> <묶음>… → 새로 만들었으면 0, 이미 있었으면 3, 거절이면 1
-# 잡은 뒤에는 바꾸지 않는다: 잡은 채 더 받으면 VM 마다의 순서가 어긋나 교착이 생길 수 있다. 기다리는 동안에는 같은 일련번호로 바꾼다.
-# 잡은 차례가 끝난 사슬이 쥔 차례(lib/vmq.zsh 의 vmq_chain_ended)면 4: 그 사슬의 뒷정리가 아직 그 차례로 VM 을 끄고 되돌리는 중일 수 있어
-# 같은 소유자에게도 넘기지 않는다. 부른 쪽(register_wait)은 그 차례가 없어질 때까지 기다린 뒤 새로 등록한다(poieve tracker bug_1792779968019_9ycb6f).
-# 4 를 돌려줄 때는 그 차례 파일의 시각(마지막 활동)을 새로 적지 않는다. 그 판정은 이 함수가 부르는 vmq_sync 가 같은 vmq_chain_ended 로 한다.
-# 뒷정리가 놓지 않은 차례는 마지막 활동에서 VMQ_LEASE 초 뒤 vmq_purge 가 지우고, 이 함수는 그 뒤 새 일련번호로 등록한다.
-# 전에는 4 일 때도 시각을 새로 적어, 2초마다 다시 부르는 register_wait 가 그 차례를 만료되지 않게 했다. 차례에 적힌 프로세스 네 개가
-# 모두 끝났는데 같은 소유자의 두 번째 acquire 가 「마지막 활동 0초 전」 을 유지했고, 뒤에서 기다리던 다른 소유자가 받지 못했다(2026-11-11 08:55Z, 일련번호 2775).
+# Creates or changes a turn: register <owner> <group>… → 0 when created, 3 when it already existed, 1 when refused.
+# A held turn is not changed: taking more while holding can put targets in different orders and deadlock. While waiting it is
+# changed under the same sequence number.
+# When the held turn is one held by an ended chain (vmq_chain_ended in lib/vmq.zsh), 4: that chain's cleanup may still be
+# stopping and restoring targets with it, so it is not handed even to the same owner. The caller (register_wait) waits until
+# that turn is gone and then registers anew. On 4 the turn file's time (last activity) is not written; the vmq_sync this
+# function calls makes that judgement with the same vmq_chain_ended. A turn the cleanup never releases is removed by vmq_purge
+# VMQ_LEASE seconds after its last activity, and this function then registers under a new sequence number.
 register() {
   local owner=$1 vm k f seq rc=3 c all=()
   shift
@@ -147,14 +161,14 @@ register() {
   vmq_all_members "$@"; all=($reply)
   vmq_lock || return 1
   {
-    # acquire · run 은 VM_QUEUE_TICKET 을 지웠으므로 vmq_sync 는 거절하지 않는다
+    # acquire and run unset VM_QUEUE_TICKET, so vmq_sync does not refuse
     vmq_sync $owner
     k=$REPLY
-    # 이 return 에도 always 의 vmq_unlock 은 실행된다
+    # The always block's vmq_unlock runs on this return too
     vmq_chain_ended "$k" && return 4
     if [[ -n $k && -n ${Q_held[$k]} ]]; then
       if ! covers "${Q_held[$k]}" "$@"; then
-        print -u2 "제어 대상 큐: 이 소유자는 이미 ${Q_held[$k]} 를 잡았다. $need 가 필요하면 vmq release 한 뒤 함께 acquire 한다"
+        print -u2 "vmq: this owner already holds ${Q_held[$k]}. To get $need, vmq release and acquire them together"
         rc=1
       fi
     elif [[ -n $k ]]; then
@@ -165,7 +179,7 @@ register() {
           f="$VMQ_DIR/$vm/$k"
           if (( ${all[(Ie)$vm]} )); then mkdir -p "$VMQ_DIR/$vm"; vmq_write $f $owner "$label" $c "$need"; else rm -f -- $f; fi
         done
-        vmq_log "바꿈 $owner $need${label:+ ($label)} (순번 ${k%%-*} 그대로)"
+        vmq_log "changed $owner $need${label:+ ($label)} (sequence ${k%%-*} kept)"
       fi
     else
       seq=$(( $(cat "$VMQ_DIR/.seq" 2>/dev/null || print 0) + 1 ))
@@ -174,38 +188,38 @@ register() {
         mkdir -p "$VMQ_DIR/$vm"
         vmq_write "$VMQ_DIR/$vm/${(l:10::0:)seq}-$owner" $owner "$label" $EPOCHSECONDS "$need"
       done
-      vmq_log "등록 $owner $need${label:+ ($label)}"
+      vmq_log "registered $owner $need${label:+ ($label)}"
       rc=0
     fi
   } always { vmq_unlock }
   return $rc
 }
 
-# register 가 4(끝난 사슬이 쥔 차례가 아직 남아 있음)이면 그 차례가 없어질 때까지 2초마다 register 를 다시 부른다:
-# register_wait <소유자> <기한(epoch 초, 0 이면 기한 없음)> <묶음>…
-# 기한은 acquire 가 시작할 때 한 번 정해 이 함수와 hold 가 함께 쓴다. 전에는 두 함수가 -w 초를 따로 세어, acquire -w N 이 최대 약 2N 초 기다렸다.
-# 그 차례는 뒷정리가 놓거나(vmq release), 놓지 않으면 마지막 활동에서 VMQ_LEASE 초 뒤 만료되어 없어진다. 기다리는 동안 register 는 그 차례의
-# 시각을 새로 적지 않는다. 그 차례에 적힌 프로세스(procs)가 살아 있고 마지막 제어 명령 · 갱신(active)에서 VMQ_HOLD_MAX 초가 지나지 않은 동안은
-# 차례표를 읽는 쪽(vmq_purge)이 시각을 새로 적어 만료되지 않는다.
-# 돌려주는 값은 register 와 같고, 기한 안에 없어지지 않으면 75.
+# While register returns 4 (a turn held by an ended chain is still there), calls register again every 2 seconds until it is gone:
+# register_wait <owner> <deadline (epoch seconds, 0 for none)> <group>…
+# acquire sets the deadline once at its start, and this function and hold share it, so acquire -w N waits at most about N seconds.
+# That turn goes when the cleanup releases it (vmq release) or, if it never does, when it expires VMQ_LEASE seconds after its
+# last activity. register does not write its time meanwhile. While a process written in its procs is alive and VMQ_HOLD_MAX has
+# not passed since the last control command or refresh (active), the queue reader (vmq_purge) writes its time so it does not expire.
+# Returns as register does, or 75 when the turn is not gone by the deadline.
 register_wait() {
   local owner=$1 deadline=$2 rc told=0
   shift 2
   while true; do
     register $owner "$@"; rc=$?
     (( rc == 4 )) || return $rc
-    (( told )) || { print -u2 "제어 대상 큐: 이 소유자의 끝난 사슬이 쥔 차례가 아직 남아 있다(그 사슬의 뒷정리가 VM 을 끄고 되돌리는 중일 수 있다). 뒷정리가 놓으면 바로, 놓지 않으면 그 차례가 마지막 활동에서 ${VMQ_LEASE}초 뒤 만료된 다음 이 명령이 새로 등록한다(그 차례에 적힌 프로세스가 살아 있으면 마지막 제어 명령 · 갱신에서 ${VMQ_HOLD_MAX}초까지는 만료되지 않는다)"; told=1 }
+    (( told )) || { print -u2 "vmq: a turn of this owner held by an ended chain is still there (its cleanup may be stopping and restoring targets). This command registers anew as soon as the cleanup releases it, or else after it expires ${VMQ_LEASE} s after its last activity (not before ${VMQ_HOLD_MAX} s after its last control command or refresh while a process written in it is alive)"; told=1 }
     (( deadline > 0 && EPOCHSECONDS >= deadline )) && return 75
     sleep 2
   done
 }
 
-# 차례를 잡을 때까지 기다린다: hold <소유자> <기한(epoch 초, 0 이면 기한 없음)>. 잡으면 REPLY 에 받은 VM.
-# 기한이 이미 지났어도 차례표를 한 번 확인한 뒤 75 를 돌려준다(그 확인에서 잡았으면 0).
+# Waits until the turn is taken: hold <owner> <deadline (epoch seconds, 0 for none)>. On success the targets are in REPLY.
+# Even when the deadline has already passed, the queue is checked once before 75 is returned (0 if that check took it).
 hold() {
   local owner=$1 deadline=$2 got=0 lost=0 start=$EPOCHSECONDS told=0 k
   while true; do
-    # 기한 없이 기다리는 run 은 한 번 어디서 기다리는지 알린다(acquire 는 기한이 지나면 알린다)
+    # A run that waits with no deadline says once where it waits (acquire says so when the deadline passes)
     if (( deadline == 0 && ! told && EPOCHSECONDS > start )); then waiting_line $owner >&2; told=1; fi
     vmq_lock || return 1
     {
@@ -215,7 +229,7 @@ hold() {
       elif [[ -n ${Q_held[$k]} ]]; then got=1; REPLY=${Q_held[$k]}
       fi
     } always { vmq_unlock }
-    (( lost )) && { print -u2 "제어 대상 큐: 차례가 사라졌다(만료 또는 강제로 놓음). 다시 acquire 한다"; return 1 }
+    (( lost )) && { print -u2 "vmq: the turn is gone (expired or force-released). Acquire again"; return 1 }
     (( got )) && return 0
     (( deadline > 0 && EPOCHSECONDS >= deadline )) && return 75
     sleep 2
@@ -228,20 +242,20 @@ waiting_line() {
   { vmq_scan; vmq_plan } always { vmq_unlock }
   k=$(vmq_key $owner)
   [[ -n $k ]] || return 0
-  print "기다리는 중: 요청 ${Q_need[$k]}"
+  print "waiting: request ${Q_need[$k]}"
   vmq_all_members ${=Q_need[$k]}
-  for vm in $reply; do print "  $vm: $(vmq_holder_line $vm)$( [[ ${Q_busy[$vm]:-} == "~"* ]] && print ", 오래 기다린 차례 ${${Q_busy[$vm]#\~}#*-} 가 맡아 둠")"; done
-  print "acquire 는 같은 명령을 다시 실행해 이어서 기다린다. 잡은 쪽의 차례는 마지막 활동에서 ${VMQ_LEASE}초가 지나면 지워진다(그 차례를 쥔 프로세스가 살아 있으면 마지막 제어 명령 · 갱신에서 ${VMQ_HOLD_MAX}초까지는 지우지 않는다)"
+  for vm in $reply; do print "  $vm: $(vmq_holder_line $vm)$( [[ ${Q_busy[$vm]:-} == "~"* ]] && print ", reserved by long-waiting turn ${${Q_busy[$vm]#\~}#*-}")"; done
+  print "acquire keeps waiting when run again with the same command. The holder's turn is removed ${VMQ_LEASE} s after its last activity (not before ${VMQ_HOLD_MAX} s after its last control command or refresh while the process holding it is alive)"
 }
 
 case $cmd in
 peek-check)
-  # 차례 없이 실행해도 되는 읽기인지 판별만 한다(lib/peek.zsh)
+  # Only judges whether a read may run without a turn (lib/peek.zsh)
   source "${0:A:h:h}/lib/peek.zsh"
-  peek_allowed "$*" && print "읽기: 차례 없이 실행해도 된다"
+  peek_allowed "$*" && print "read: may run without a turn"
   ;;
 list)
-  # 대상 목록(VMQ_REGISTRY)
+  # The target list (VMQ_REGISTRY)
   for v in ${(ok)VMQ_HOST}; do print -r -- "$v	${VMQ_HOST[$v]}	${VMQ_ROLES[$v]// /,}	${VMQ_OS[$v]}"; done
   ;;
 acquire)
@@ -249,14 +263,14 @@ acquire)
   (( ${#reply} )) || usage
   expand_groups $reply || exit 1
   owner=$(vmq_owner) || exit 1
-  # -w 는 이 명령 전체의 기한이다. register_wait 와 hold 가 같은 기한을 쓴다
+  # -w is the deadline of the whole command. register_wait and hold share it
   deadline=0; (( wait_s > 0 )) && deadline=$(( EPOCHSECONDS + wait_s ))
   register_wait $owner $deadline $groups; rc=$?
   (( rc == 1 )) && exit 1
   (( rc == 75 )) && exit 75
   hold $owner $deadline; rc=$?
   case $rc in
-  0) print "잡음: ${REPLY// /, } (소유자 $owner). 끝나면 vmq release" ;;
+  0) print "held: ${REPLY// /, } (owner $owner). vmq release when done" ;;
   75) waiting_line $owner; exit 75 ;;
   *) exit 1 ;;
   esac
@@ -266,19 +280,20 @@ mine)
   held= ticket_ok=0
   vmq_lock || exit 1
   { vmq_sync $owner && { ticket_ok=1; k=$REPLY; held=${Q_held[$k]:-} } } always { vmq_unlock }
-  # VM_QUEUE_TICKET 거절이면 vmq_ticket_ok 가 이유를 stderr 에 썼다
+  # On a VM_QUEUE_TICKET refusal vmq_ticket_ok wrote the reason to stderr
   (( ticket_ok )) || exit 1
-  [[ -n $held ]] || { print -u2 "잡은 VM 이 없다(소유자 $owner)"; exit 1 }
+  [[ -n $held ]] || { print -u2 "vmq: no target held (owner $owner)"; exit 1 }
   print -r -- $held
   ;;
 ticket)
-  # 이 소유자의 차례 키를 찍는다. 조회라 차례표를 정리만 하고(vmq_settle) 이 소유자의 차례라는 이유로 시각을 새로 적지는 않는다(vmq_touch 를
-  # 부르지 않는다). vmq_settle 안의 vmq_purge(holdMax 로 판정한 차례의 시각을 새로 적음) · vmq_commit(배정된 대기 차례를 잡음)은 이 명령에서도
-  # 돈다. 그 키를 VM_QUEUE_TICKET 에 주면 그 뒤의 vmq_require · vmq release 등은 그 차례에만 적용된다(lib/vmq.zsh 의 vmq_ticket_ok)
+  # Prints this owner's turn key. It is a read, so the queue is only settled (vmq_settle) and the time is not written because it
+  # is this owner's turn (vmq_touch is not called). vmq_purge (writes the time of turns judged holdMax) and vmq_commit (takes an
+  # assigned waiting turn) inside vmq_settle run here too. With that key in VM_QUEUE_TICKET, later vmq_require, vmq release and
+  # the rest apply only to that turn (vmq_ticket_ok in lib/vmq.zsh)
   owner=$(vmq_owner) || exit 1
   vmq_lock || exit 1
   { vmq_settle $owner; k=$REPLY } always { vmq_unlock }
-  [[ -n $k ]] || { print -u2 "차례가 없다(소유자 $owner)"; exit 1 }
+  [[ -n $k ]] || { print -u2 "vmq: no turn (owner $owner)"; exit 1 }
   print -r -- $k
   ;;
 release)
@@ -289,7 +304,7 @@ release)
   {
     vmq_scan
     k=$(vmq_key $owner)
-    # VM_QUEUE_TICKET 이 지금 차례와 다르면 아무 파일도 지우지 않는다(이유는 vmq_ticket_ok 가 stderr 에 쓴다)
+    # When VM_QUEUE_TICKET differs from the current turn no file is removed (vmq_ticket_ok writes the reason to stderr)
     if ! vmq_ticket_ok $owner "$k"; then
       ticket_ok=0
     elif [[ -n $k ]]; then
@@ -297,16 +312,16 @@ release)
       for vm in ${=Q_vms[$k]}; do
         if (( ${vms[(Ie)$vm]} )); then rm -f -- "$VMQ_DIR/$vm/$k"; gone+=($vm); else left+=($vm); fi
       done
-      # 일부만 놓으면 남은 VM 으로 held · need 를 줄인다(놓은 VM 을 다시 기다리지 않게)
+      # A partial release narrows held and need to the targets left (so the released ones are not waited for again)
       if (( ${#left} && ${#gone} )) && [[ -n ${Q_held[$k]} ]]; then
         f="$VMQ_DIR/${left[1]}/$k"
         for vm in $left; do vmq_write "$VMQ_DIR/$vm/$k" $owner "$(vmq_field $f label)" "$(vmq_field $f created)" "$left" "$left" "$(vmq_field $f active)" "$(vmq_field $f procs)" "$(vmq_field $f chain)"; done
       fi
     fi
-    (( ${#gone} )) && vmq_log "놓음 $owner ${(j: :)gone}"
+    (( ${#gone} )) && vmq_log "released $owner ${(j: :)gone}"
   } always { vmq_unlock }
   (( ticket_ok )) || exit 1
-  (( ${#gone} )) && print "놓음: ${(j:, :)gone}" || print "놓을 차례가 없다(소유자 $owner)"
+  (( ${#gone} )) && print "released: ${(j:, :)gone}" || print "nothing to release (owner $owner)"
   ;;
 status)
   as_json=0; [[ ${1:-} == --json ]] && { as_json=1; shift }
@@ -320,38 +335,38 @@ status)
     vmq_tickets $vm
     hk=$(vmq_holder $vm)
     if [[ -z $hk ]]; then
-      line="$vm ($host): 비어 있음"
-      [[ ${Q_busy[$vm]:-} == "~"* ]] && line+=", 오래 기다린 차례 ${${Q_busy[$vm]#\~}#*-} 가 맡아 둠"
-      [[ -n ${Q_busy[$vm]:-} && ${Q_busy[$vm]} != "~"* ]] && line+=", ${Q_busy[$vm]#*-} 에게 배정됨(그 소유자가 다음에 확인할 때 잡는다)"
+      line="$vm ($host): free"
+      [[ ${Q_busy[$vm]:-} == "~"* ]] && line+=", reserved by long-waiting turn ${${Q_busy[$vm]#\~}#*-}"
+      [[ -n ${Q_busy[$vm]:-} && ${Q_busy[$vm]} != "~"* ]] && line+=", assigned to ${Q_busy[$vm]#*-} (that owner takes it at its next check)"
       print -r -- $line
     else
-      # held 에 적힌 대상의 파일이 없으면(대상마다 만료를 판정하던 전의 vmq_purge 가 남긴 차례) 그 차례의 남은 파일로 읽는다
+      # When the file of a target in held is gone (a turn left by an older per-file vmq_purge), read the turn's remaining file
       f="$VMQ_DIR/$vm/$hk"; [[ -f $f ]] || f=${Q_file[$hk]}
       o=$(vmq_key_owner $hk); l=$(vmq_field $f label); c=$(vmq_field $f created)
-      mark=""; [[ $o == $me ]] && mark=" ← 이 세션"
-      # 만료는 차례 단위로 판정한다(vmq_purge 와 같은 vmq_key_expiry). 같은 차례의 대상 줄은 모두 같은 만료를 찍는다
+      mark=""; [[ $o == $me ]] && mark=" ← this session"
+      # Expiry is judged per turn (the same vmq_key_expiry as vmq_purge), so every target line of a turn shows the same expiry
       vmq_key_expiry $hk ${=Q_vms[$hk]}
       if [[ ${Q_exp[1]} == holdMax ]]; then
-        lease_line="프로세스 ${Q_exp[3]} 가 살아 있어 만료되지 않음(마지막 제어 명령 · 갱신 ${Q_exp[4]}초 전, 상한 ${VMQ_HOLD_MAX}초)"
+        lease_line="does not expire while process ${Q_exp[3]} is alive (last control command or refresh ${Q_exp[4]} s ago, limit ${VMQ_HOLD_MAX} s)"
       else
-        lease_line="마지막 활동 ${Q_exp[4]}초 전, 만료까지 ${Q_exp[2]}초"
+        lease_line="last activity ${Q_exp[4]} s ago, expires in ${Q_exp[2]} s"
       fi
-      print "$vm ($host): 잡음 $o${l:+ ($l)}, 함께 잡은 VM ${Q_held[$hk]}, 등록 $(( EPOCHSECONDS - c ))초 전, $lease_line$mark"
+      print "$vm ($host): held by $o${l:+ ($l)}, held together ${Q_held[$hk]}, registered $(( EPOCHSECONDS - c )) s ago, $lease_line$mark"
     fi
     i=1
     for f in $reply; do
       k=${f:t}
       [[ $k == $hk ]] && continue
       o=$(vmq_key_owner $k); l=$(vmq_field $f label); c=$(vmq_field $f created)
-      mark=""; [[ $o == $me ]] && mark=" ← 이 세션"
-      print "  대기 $i: $o${l:+ ($l)}, 요청 ${Q_need[$k]}, 등록 $(( EPOCHSECONDS - c ))초 전$mark"
+      mark=""; [[ $o == $me ]] && mark=" ← this session"
+      print "  waiting $i: $o${l:+ ($l)}, request ${Q_need[$k]}, registered $(( EPOCHSECONDS - c )) s ago$mark"
       (( i++ ))
     done
   done
   ;;
 run)
   parse "$@"; specs=() cmdline=()
-  # `--` 앞은 묶음, 뒤는 명령
+  # Groups before `--`, the command after
   seen=0
   for a in $reply; do
     if (( ! seen )) && [[ $a == -- ]]; then seen=1; continue; fi
@@ -363,10 +378,11 @@ run)
   register_wait $owner 0 $groups; rc=$?
   (( rc == 1 )) && exit 1
   mine=$(( rc == 0 ))
-  # TERM · INT · HUP 으로 끝나도 이 명령이 만든 차례(기다리는 요청이든 잡은 차례든)를 놓는다. 전에는 명령이 돌아온 뒤에만 놓아,
-  # TaskStop(프로세스 그룹에 TERM) · pkill 로 끝난 run 의 SMB 빌드 차례가 LEASE 1200초 동안 남았다(2026-10-23 두 번, bug_1792813277239_fyx5wg).
-  # zsh 는 명령(자식)이 도는 동안 받은 신호의 trap 을 그 명령이 끝난 뒤 실행하므로, run 에만 TERM 이 가면 명령이 끝날 때까지 차례를 쥔다.
-  # KILL 은 받을 수 없고 그때 명령이 아직 도는지도 알 수 없어 전처럼 LEASE 로 만료된다.
+  # Releases the turn this command made (a waiting request or a held turn) also when ended by TERM, INT or HUP. Otherwise a
+  # run ended by a tool stop (TERM to the process group) or pkill would leave its turn until the lease ran out.
+  # zsh runs the trap of a signal received while a command (child) runs after that command ends, so when only run gets TERM,
+  # the turn is held until the command ends. KILL cannot be caught, and whether the command still runs then is unknown, so the
+  # turn expires by LEASE.
   granted=
   run_release() { (( mine )) && "$self" release ${=granted} >/dev/null 2>&1; true }
   trap 'run_release; exit 129' HUP
@@ -374,7 +390,7 @@ run)
   trap 'run_release; exit 143' TERM
   hold $owner 0 || { run_release; exit 1 }
   granted=$REPLY
-  # 명령이 도는 동안 이 프로세스가 차례를 쥔다(명령이 vmq_require 를 부르지 않아도 만료되지 않게)
+  # This process holds the turn while the command runs (so it does not expire even if the command never calls vmq_require)
   vmq_lock || exit 1
   { vmq_sync $owner; vmq_attach $REPLY $$ } always { vmq_unlock }
   VM_QUEUE_GRANTED=$granted "${cmdline[@]}"; rc=$?
@@ -382,47 +398,100 @@ run)
   exit $rc
   ;;
 ended)
-  # 이 소유자의 그 VM 차례가 마지막에 어떻게 끝났는지를 차례표의 log 에서 읽는다(기록 형식은 이 파일 · lib/vmq.zsh 의 vmq_log 줄이 정한다).
-  # 사건 · 시각 · 그 뒤 그 VM 을 잡은 다른 소유자(없으면 -)를 한 줄로 찍는다: `만료 2026-10-23 07:13:08 -`. 그 뒤 이 소유자가 다시 잡았거나
-  # 끝난 차례가 없으면 종료 코드 1. poieve 의 vm_chain_watch 가 사슬이 놓은 것과 만료로 지워진 것을 가를 때 부른다(bug_1792774871149_2f64d4).
-  vm=${1:?대상}; [[ -n ${VMQ_HOST[$vm]:-} ]] || { print -u2 "모르는 대상: $vm"; exit 1 }
+  # Reads from the queue log how this owner's last turn on the target ended (the record forms are set by the vmq_log lines in
+  # this file and lib/vmq.zsh). Prints one line: event, time, and the other owner that took the target afterwards (- for none):
+  # `expired 2026-10-23 07:13:08 -`. Exit 1 when this owner took it again afterwards or no ended turn is found. A chain
+  # watcher calls this to tell a turn its chain released from one removed by expiry.
+  vm=${1:?target}; [[ -n ${VMQ_HOST[$vm]:-} ]] || { print -u2 "vmq: unknown target: $vm"; exit 1 }
   owner=$(vmq_owner) || exit 1
-  [[ -r $VMQ_DIR/log ]] || { print -u2 "차례표의 log 가 없다: $VMQ_DIR/log"; exit 1 }
+  [[ -r $VMQ_DIR/log ]] || { print -u2 "vmq: no queue log: $VMQ_DIR/log"; exit 1 }
   awk -v vm=$vm -v me=$owner '
-    # 잡음 <소유자> <VM>…[ (설명)] · 놓음 <소유자> <VM>… · 만료 <VM> <소유자> (…) · 강제로 놓음 <VM>… <소유자> (요청 …)
+    # held <owner> <target>…[ (label)] · released <owner> <target>… · expired <target> <owner> (…) · force-released <target>… <owner> (by …)
     function has(from, to,   i) { for (i = from; i <= to; i++) if ($i == vm) return 1; return 0 }
     function finish(e) { ev = e; at = $1 " " $2; next_owner = "-"; ended = 1 }
-    $3 == "잡음" {
+    $3 == "held" {
       last = NF; for (i = 5; i <= NF; i++) if (substr($i, 1, 1) == "(") { last = i - 1; break }
       if (!has(5, last)) next
       if ($4 == me) ended = 0; else if (ended && next_owner == "-") next_owner = $4
       next
     }
-    $3 == "놓음" && $4 == me && has(5, NF) { finish("놓음"); next }
-    $3 == "만료" && $4 == vm && $5 == me { finish("만료"); next }
-    $3 == "강제로" && $4 == "놓음" {
-      # macOS awk(20200816)의 substr · length 는 바이트 단위라 「(요청」(7바이트)을 substr($i, 1, 3) 으로 대조하면 늘 거짓이었다.
-      # 그래서 강제로 놓은 차례를 찾지 못하고 종료 코드 1 로 끝났다(2026-11-11 확인). 앞부분 대조는 index 로 한다
-      for (i = 5; i <= NF; i++) if (index($i, "(요청") == 1) break
-      if ($(i - 1) == me && has(5, i - 2)) finish("강제로놓음")
+    $3 == "released" && $4 == me && has(5, NF) { finish("released"); next }
+    $3 == "expired" && $4 == vm && $5 == me { finish("expired"); next }
+    $3 == "force-released" {
+      for (i = 4; i <= NF; i++) if ($i == "(by") break
+      if ($(i - 1) == me && has(4, i - 2)) finish("force-released")
     }
     END { if (!ended) exit 1; print ev, at, next_owner }
-  ' "$VMQ_DIR/log" || { print -u2 "$vm 에서 끝난 차례가 없다(소유자 $owner, 기록 $VMQ_DIR/log)"; exit 1 }
+  ' "$VMQ_DIR/log" || { print -u2 "vmq: no ended turn on $vm (owner $owner, log $VMQ_DIR/log)"; exit 1 }
   ;;
 force-release)
-  vm=${1:?대상}; [[ -n ${VMQ_HOST[$vm]:-} ]] || { print -u2 "모르는 대상: $vm"; exit 1 }
+  vm=${1:?target}; [[ -n ${VMQ_HOST[$vm]:-} ]] || { print -u2 "vmq: unknown target: $vm"; exit 1 }
   vmq_lock || exit 1
   {
     vmq_scan
     hk=$(vmq_holder $vm)
     if [[ -n $hk ]]; then
       for v in ${=Q_vms[$hk]}; do rm -f -- "$VMQ_DIR/$v/$hk"; done
-      vmq_log "강제로 놓음 ${Q_vms[$hk]} $(vmq_key_owner $hk) (요청 $(vmq_owner 2>/dev/null || print -))"
-      print "강제로 놓음: ${Q_vms[$hk]} 의 $(vmq_key_owner $hk)"
+      vmq_log "force-released ${Q_vms[$hk]} $(vmq_key_owner $hk) (by $(vmq_owner 2>/dev/null || print -))"
+      print "force-released: ${Q_vms[$hk]} of $(vmq_key_owner $hk)"
     else
-      print "$vm: 잡은 차례가 없다"
+      print "$vm: no turn holds it"
     fi
   } always { vmq_unlock }
+  ;;
+init)
+  # Creates the data folder and a target list holding only its header comment. An existing list is left as it is
+  if [[ -e $VMQ_REGISTRY ]]; then print "target list exists: $VMQ_REGISTRY ($(( ${#VMQ_HOST} )) targets)"; exit 0; fi
+  mkdir -p "${VMQ_REGISTRY:h}" || exit 1
+  sed -n '/^#/p' "$VMQ_ROOT/examples/resources.tsv" | sed '1s/.*/# vmq target list. Add targets with `vmq target add` (README "Targets")./' > "$VMQ_REGISTRY" || exit 1
+  print "created: $VMQ_REGISTRY. Add targets: vmq target add <name> <mac> <roles> <os>"
+  ;;
+target)
+  sub=${1:-}; (( $# )) && shift
+  case $sub in
+  add)
+    (( $# == 4 )) || { print -u2 "usage: vmq target add <name> <mac> <roles, comma-separated or -> <os: macOS|Windows|Linux|->"; exit 2 }
+    name=$1 mac=$2 roles=$3 os=$4
+    # The name goes into turn file paths and the mac into ssh; roles and os are matched as words
+    [[ $name =~ '^[A-Za-z0-9._-]+$' && $name != (.|..) ]] || { print -u2 "vmq: a target name takes only letters, digits and . _ -: $name"; exit 1 }
+    [[ $mac =~ '^[A-Za-z0-9._:@-]+$' ]] || { print -u2 "vmq: the Mac address takes only letters, digits and . _ : @ -: $mac"; exit 1 }
+    [[ $roles == - || $roles =~ '^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$' ]] || { print -u2 "vmq: roles are words joined with , (or -): $roles"; exit 1 }
+    [[ $os == (macOS|Windows|Linux|-) ]] || { print -u2 "vmq: the operating system is macOS, Windows, Linux or -: $os"; exit 1 }
+    [[ $roles == - ]] && roles=
+    [[ -e $VMQ_REGISTRY ]] || "$self" init >/dev/null || exit 1
+    vmq_lock || exit 1
+    {
+      vmq_load_registry
+      if [[ -n ${VMQ_HOST[$name]:-} ]]; then
+        print -u2 "vmq: target $name exists (${VMQ_HOST[$name]}, roles ${${VMQ_ROLES[$name]// /,}:--}, ${VMQ_OS[$name]}). Remove it first to change it"; rc=1
+      else
+        print -r -- "$name	$mac	$roles	$os" >> "$VMQ_REGISTRY" && vmq_log "target-added $name $mac ${roles:--} $os" && rc=0 || rc=1
+      fi
+    } always { vmq_unlock }
+    (( rc == 0 )) && print "added: $name	$mac	${roles:--}	$os"
+    exit $rc
+    ;;
+  remove)
+    (( $# == 1 )) || { print -u2 "usage: vmq target remove <name>"; exit 2 }
+    name=$1
+    vmq_lock || exit 1
+    {
+      vmq_load_registry
+      if [[ -z ${VMQ_HOST[$name]:-} ]]; then
+        print -u2 "vmq: no target $name in $VMQ_REGISTRY"; rc=1
+      elif vmq_tickets $name; (( ${#reply} )); then
+        print -u2 "vmq: turns hold or wait for $name (${(j:, :)${reply:t}}). Release them first (vmq status $name)"; rc=1
+      else
+        tmp=$VMQ_REGISTRY.$$
+        awk -F '\t' -v n=$name '$1 != n' "$VMQ_REGISTRY" > $tmp && mv -- $tmp "$VMQ_REGISTRY" && rmdir "$VMQ_DIR/$name" 2>/dev/null
+        vmq_log "target-removed $name"; rc=0
+      fi
+    } always { vmq_unlock }
+    (( rc == 0 )) && print "removed: $name"
+    exit $rc
+    ;;
+  *) usage ;;
+  esac
   ;;
 *) usage ;;
 esac

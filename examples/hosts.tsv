@@ -1,0 +1,5 @@
+# vmq SSH address list (lib/vmq.zsh vmq_ssh_opts). Copy to ~/Library/Application Support/vmq/hosts.tsv (or set VMQ_HOSTS_FILE).
+# One Mac per line, tab-separated: <identity address>	<addresses to try, space-separated, first first>
+# The identity address is the second column of resources.tsv and the known_hosts key. When another address answers,
+# vmq connects to it with HostKeyAlias=<identity address>, so the same host key is checked.
+mac-b.local	10.0.0.2 192.168.0.20 mac-b.local

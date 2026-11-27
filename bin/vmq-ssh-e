@@ -1,6 +1,7 @@
 #!/bin/zsh
-# scp 의 -S 로 주는 ssh: ssh 자신의 진단을 VMQ_SSH_ERR 파일로 보낸다(lib/vmq.zsh 의 vmq_ssh_retry 가 그 파일로 배너 교환 시간 초과를 가린다).
-# scp 에는 ssh 의 -E 가 없어 이 파일을 거친다(poieve bug_1792822845742_xbheol).
-# -E 와 경로는 두 인자로 넘긴다. zsh 는 ${X:+-E "$X"} 를 낱말로 나누지 않아 「-E /경로」 한 인자가 되었고, ssh 가 앞에 공백이 붙은 경로를 열지 못했다
+# The ssh given to scp with -S: sends ssh's own diagnostics to the VMQ_SSH_ERR file (vmq_ssh_retry in lib/vmq.zsh reads that file to
+# tell a banner exchange timeout). scp has no -E of its own, so it goes through this file.
+# -E and the path are passed as two arguments: zsh does not split ${X:+-E "$X"} into words, so it would become one argument
+# "-E /path" and ssh would fail to open a path with a leading space
 [[ -n ${VMQ_SSH_ERR:-} ]] && exec ssh -E "$VMQ_SSH_ERR" "$@"
 exec ssh "$@"

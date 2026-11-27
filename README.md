@@ -1,213 +1,231 @@
-# vmq: 세션 여럿이 함께 다루는 VM · 장치의 제어 큐
+# vmq: a control queue for VMs and devices shared by Claude Code sessions
 
-전역 규약 `~/.claude/CLAUDE.md` §18 의 도구다. §18 의 본문은 2026-11-04 사용자 결정으로 이 문서의 「전역 규약」 절로 옮겼다. 2026-10-12 사용자 지시 「Vm 운영 방법은글로벌 규칙과 툴로 적용해줘 그래야 다양한 업무를 동시 다발로 할 수 있으니까」로 poieve 의 `CloudLLM-Claude-code/tools` 에서 이 폴더로 옮겼다(그 저장소 커밋 `01ba392` · `e5e2b60` · `b787e7b` 가 처음 구현).
+[한국어](README.ko.md)
 
-이 문서의 `vmq` 는 `~/.claude/tools/vmq/bin/vmq` 다(PATH 에 넣지 않았다).
+When several Claude Code sessions drive the same test VM, device or app window, one session's clicks, key presses or snapshot restores break another session's test. vmq is a queue for those targets: a session takes a turn on a target, drives it, and releases it. The scripts that drive a target call `vmq_require` before each control command, so a session without a turn is refused before anything happens.
 
-## 전역 규약
+The plugin has four parts:
 
-2026-11-04 에 `~/.claude/CLAUDE.md` §18 에서 아래 본문을 그대로 옮겼다(사용자 결정). §18 에는 이 절을 가리키는 줄만 남겼다.
+| Part | Path | What it does |
+|---|---|---|
+| CLI | `bin/vmq` | `acquire`, `release`, `run`, `status`, ... On the Bash tool's PATH while the plugin is enabled |
+| Shell library | `lib/vmq.zsh`, `lib/peek.zsh` | `vmq_require`, `vmq_keepalive`, `vmq_ssh`, `peek_allowed` for project scripts |
+| Mod | `hooks/register.tsx` | The queue in the status line, a pane (`/vmq`) and toasts; starts and prompts the `vmq-main` session |
+| Skill | `skills/queue/SKILL.md` | Tells every session the rules: take a turn before driving a shared target |
 
-**여러 세션이 함께 다룰 수 있는 VM · 장치 · 화면은 제어 큐에 등록하고 차례를 받은 뒤에만 다룬다.** 2026-10-12 사용자 지시
-(원문 · 경과: `~/.claude/memory/feedback_shared_device_control_queue.md`). 병렬 세션이 같은 시험 VM 을 함께 다루면 한쪽의
-클릭 · 키 입력 · 스냅숏 되돌리기가 다른 쪽의 확인을 깨뜨린다.
-★ **대상.** 세션 둘 이상이 함께 다룰 수 있고 상태가 바뀌는 제어 대상 전부다: 시험 VM, cua-driver · computer use 로 다루는
-  데스크톱과 앱 창, 실기기(USB 연결 기기 · 원격 Mac), 시뮬레이터, 같은 브라우저 프로필. 상태를 묻기만 하는 명령(목록 ·
-  켜짐 확인 · 주소)은 대상이 아니다. 화면 캡처는 읽기지만 다른 세션이 조작하는 도중의 화면을 근거로 삼게 되므로 차례 안에서 한다.
-★ **차례 없는 읽기도 도구가 판별한다(2026-10-12 사용자 지시).** 대상 안에서 실행하는 읽기 명령(프로세스 · 파일 · 로그 · DB 값)은 차례 없이 실행하되, 읽기인지는 부르는 쪽이 아니라
-  도구의 목록이 판별한다: 명령 · 인자 규칙이 목록에 맞을 때만 실행하고, 명령을 잇거나 파일에 쓰는 문법(`;` · `&` · `>` · `$(`)과
-  목록 밖의 명령은 대상에 접속하기 전에 거절한다. 다른 세션이 잡은 대상에서 읽은 값은 그 세션이 다루는 도중의 상태이므로 내 확인의
-  근거로 적지 않는다. 판별 목록은 전역 도구의 `lib/peek.zsh` 다(아래 「도구」).
-★ **지킬 것 네 가지.**
-  ① 다루기 전에 큐에 등록하고 차례를 받는다. 다른 소유자가 다루고 있으면 기다렸다가 차례가 오면 진행한다.
-  ② 등록하지 않은 쪽은 진행하지 못하게 **도구가 막는다.** 규칙을 아는 쪽의 준수에 기대지 않는다. 그 대상을 다루는 스크립트가
-     제어 명령을 실행하기 전에 차례를 확인하고, 없으면 아무것도 하기 전에 종료 코드 1 로 거절한다.
-  ③ 끝나면 놓는다. 놓지 않고 떠난 차례는 마지막 활동에서 정한 시간이 지나면 만료되어 다음 차례로 넘어간다.
-  ④ 여러 대를 함께 다루면 한 번에 함께 받는다. 잡은 채 다른 대상을 더 받지 않는다. 대상마다 순서가 어긋나 서로 기다리게
-     된다(교착).
-★ **도구는 전역 도구 하나를 쓴다: `~/.claude/tools/vmq/`(사용법 · 규칙 · 붙이는 법은 그 폴더 `README.md`).** 2026-10-12 사용자
-  지시. 프로젝트마다 큐를 따로 만들지 않는다. 차례표가 둘이면 같은 대상을 두 프로젝트가 각자의 차례로 다루게 된다. 대상 목록(`resources.tsv`)과 차례표
-  (`~/Library/Application Support/vmq/queue`)는 이 Mac 에 하나씩이다. 새 대상은 목록에 한 줄 더하고, 그 대상을 다루는 프로젝트
-  스크립트가 `lib/vmq.zsh` 를 source 해 제어 명령 앞에서 `vmq_require` 를 부르게 한다(②). 차례 없는 읽기 명령을 두면 접속 전에
-  `lib/peek.zsh` 의 `peek_allowed` 로 판별한다.
-★ **같은 일을 할 수 있는 대상이 여럿이면 후보로 받는다.** `vmq acquire @<역할>` 은 그 역할의 대상 중 먼저 비는 것을 준다
-  (2026-10-12 사용자 지시). 대상의 이전 상태(스냅숏 ·
-  페어링 · 설정)에 기대는 일만 이름으로 받는다. 기다리는 중에 후보를 넓히려면 같은 순번으로 `acquire` 를 다시 실행한다.
-★ **대상이 여럿이면 결과에 그 대상의 빌드 식별값을 적는다.** 대상마다 설치된 빌드가 다를 수 있다(같은 작업 트리를 세션 여럿이
-  고치고, 대상이 Mac 여러 대에 있다. 같은 날 사용자 지시). 설치할 때
-  커밋 · 커밋하지 않은 변경의 해시 · 실행 파일 해시를 대상 안에 적고, 시험 결과 · 기록에는 그 줄을 함께 적는다. 두 대상의 빌드가
-  다르면 둘 사이의 동작을 판정하지 않는다(일부러 다르게 둔 업그레이드 시험은 빼고).
-★ **큐를 바꾸면 §8 ③ 대로 깨 보고 믿는다.** `tests/stress.zsh`(동시에 잡은 수의 최대가 1) · `tests/peek.zsh`(판별 51가지: 읽기 18 · 거절 33)를
-  시험용 차례표로 다시 돌리고, 바꾼 자리를 일부러 깬 복사본에서 같은 시험이 실패하는 것을 확인한 뒤 복사본을 지운다.
-★ **하위 세션 · 하위 에이전트에게 그 대상을 맡길 때는 지시문에 큐 사용법을 적는다.** 받기 · 기다리기(75 면 다시 실행) ·
-  놓기 · 상태 보기, 후보로 받을지 이름으로 받을지, 차례 없는 읽기 명령, 빌드 식별값을 적을 것. 전역 도구 `README.md` 의 「하위
-  세션 지시문에 넣을 것」을 옮긴다. 「부모의 메시지를 기다려라」 같은 말로 순서를 정하지 않는다. 그 말은 도구가 막지 않는다.
-★ 경과: `~/.claude/memory/feedback_shared_device_control_queue.md`.
+## Requirements
 
-## 파일
+- macOS (the queue lives in `~/Library/Application Support`, and `nc -G` is the BSD `nc` option)
+- zsh, `jq`
+- Claude Code with plugin hooks modules (mods) and plugin `bin/` on the Bash tool's PATH. Tested with 2.1.332
 
-| 경로 | 무엇 |
+## Install
+
+In Claude Code:
+
+```
+/plugin marketplace add hwanyong/vmq
+/plugin install vmq@vmq
+```
+
+or from a shell:
+
+```sh
+claude plugin marketplace add hwanyong/vmq
+claude plugin install vmq@vmq --scope user
+```
+
+Then list the targets your sessions share ("Targets" below). Either ask Claude in words ("add my test VMs TestServer and TestClient on this Mac, roles server and client"), and the skill `vmq:queue` runs the commands for you, or run them yourself:
+
+```sh
+vmq init
+vmq target add TestServer localhost server,myproject macOS
+vmq target add TestClient localhost client,myproject macOS
+vmq list
+```
+
+Until a target is listed, the status line says `vmq: no targets yet` and `vmq-main` is not started.
+
+## Targets
+
+The target list is `~/Library/Application Support/vmq/resources.tsv` (`VMQ_REGISTRY`). Change it with these commands, not by hand: they check the values, refuse a name that exists, refuse to remove a target a turn holds or waits for, and log the change in the queue log.
+
+| Command | What it does |
 |---|---|
-| `resources.tsv` | 대상 목록. 줄마다 `<이름>` · `<그 대상이 있는 Mac 의 SSH 주소>` · `<역할, 쉼표로>` · `<운영체제>`(탭). 운영체제는 그 대상 안에서 도는 운영체제(`macOS` · `Windows` · `Linux`)이고, 운영체제가 없는 대상(SMB 빌드 차례)은 `-` 다(2026-11-11 사용자 결정). 이 Mac 에 하나뿐이고, 대상을 더하거나 지우면 이 파일만 고친다 |
-| `hosts.tsv` | Mac 의 SSH 주소 목록. 줄마다 `<식별 주소>`(`resources.tsv` 둘째 열, known_hosts 의 키 이름) · `<시도할 주소, 공백으로, 앞부터>`(탭). `lib/vmq.zsh` 의 `vmq_ssh_opts <식별 주소>` 가 앞부터 2초씩 시도해 된 주소를 고르고, 식별 주소가 아니면 `-o HostName=<그 주소> -o HostKeyAlias=<식별 주소>` 를 더한다. Thunderbolt 브리지가 끊기면 LAN 주소로 가기 위해서다(2026-10-23 사용자 「간혹 썬더볼트 브릿지 연결이 끊길 때가 있어. 이 경우 일반 이더넷 네트워크 IP로 접근해야 돼.」, poieve `task_1792776616889_c8rezv`). `reply` 는 늘 `VMQ_SSH_BASE`(`-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4`, 응답 없는 연결은 약 75초에 종료 코드 255)로 시작하므로 부르는 쪽은 이 선택 사항을 따로 붙이지 않는다(2026-10-23, poieve `bug_1792793532531_0ks4u2`: 붙이지 않은 자리의 ssh 가 35분 남았다). ssh 는 `vmq_ssh <식별 주소> [선택 사항…] [원격 명령…]` 로 실행한다. 시도마다 `vmq_ssh_opts` 로 선택 사항을 정하고, 배너 교환에서 끝난 연결(종료 코드 255 와 `during banner exchange`)만 첫 시도부터 `VMQ_SSH_RETRY_S` 초(기본 30, 어림) 안에서 새 연결로 다시 시도하며, 다시 시도할 때마다 stderr 와 `log` 에 `ssh <식별 주소>: … 다시 시도(<n>번째 시도, 첫 시도부터 <초>초)` 를 적는다. Mac Studio 커널이 들어오는 패킷을 `reason: NECP` 로 버린 연결이 배너를 5초 안에 받지 못해 끝났고 바로 뒤의 새 연결은 정상이었기 때문이다(2026-10-23, poieve `bug_1792810184598_skyztm`). 기본 30초는 어림이다. 그 값에서 정한 것이 아니고, 잰 것은 3번 모두 다음 연결에서 됐다는 것이다(2번째 시도는 첫 시도부터 약 5.1초). 2번째 시도마저 실패한 경우는 아직 재지 못했다. 다시 재는 법은 `log` 의 `ssh <식별 주소>: <n>번 시도, <초>초, 종료 코드 <c>` 줄을 모아 몇 번째 시도에서 됐는지와 한도에 걸린 것이 있는지 보는 것이다(`lib/vmq.zsh` 의 `vmq_ssh` 주석). 배너 전에는 원격 명령이 시작되지 않고 표준 입력도 읽히지 않아 파이프로 입력을 넘기는 호출도 다시 시도할 수 있다. 다시 시도의 몸통은 `vmq_ssh_retry <기록 이름> <준비 함수> [인자…]` 다. 준비 함수가 시도마다 `reply` 에 명령 전체를 넣고, 그 명령의 ssh 진단은 `$VMQ_SSH_ERR` 로 보낸다(ssh 는 `-E "$VMQ_SSH_ERR"`, scp 는 `-S ~/.claude/tools/vmq/bin/vmq-ssh-e` 이고 `-q` 를 주지 않는다. scp 가 그 아래 ssh 에도 `-q` 를 넘겨 「during banner exchange」 가 쓰이지 않았다). 게스트(VM)로 가는 ssh · scp 도 이것으로 같은 규칙을 쓴다(2026-10-24, poieve `bug_1792822845742_xbheol`: ProxyCommand 를 거친 게스트 ssh 가 배너 교환에서 끝나 첫 설치가 멈췄다). 이미 반복해서 다시 묻는 자리(VM 이 켜지기를 기다리는 반복 등)는 `VMQ_SSH_RETRY_S=0` 으로 다시 시도를 끈다. 기록 줄은 `ssh <대상>: …` · `scp <대상>: …` 이다. |
-| `bin/vmq` | 명령. `vmq help` 가 사용법을 찍는다 |
-| `bin/vmq-main` | 세션 `vmq-main` 을 연다(아래 「세션 vmq-main」) |
-| `VMQ-MAIN.md` | 세션 `vmq-main` 의 역할 지시문(받는 요청 · 판정 처리 · 권한) |
-| `.claude/settings.json` · `.claude/hooks/vmq-main-start.zsh` | SessionStart 훅. 이름이 `vmq-main` 인 세션에 `VMQ-MAIN.md` 전문을 문맥으로 넣는다 |
-| `lib/vmq.zsh` | 큐 · 배정 · `vmq_require`. 프로젝트 도구가 `source` 한다 |
-| `lib/peek.zsh` | 차례 없는 읽기의 판별(`peek_allowed`). 프로젝트 도구가 `source` 한다 |
-| `tests/stress.zsh` · `tests/peek.zsh` · `tests/keepalive.zsh` · `tests/pair.zsh` | 회귀 시험(아래 「시험」) |
-| `mod/vmq-view/` | Claude Code mod `vmq-view`(아래 「mod vmq-view」) |
-| `.claude-plugin/marketplace.json` | 이 저장소를 plugin marketplace `vmq` 로 등록한다. 들어 있는 plugin 은 `vmq-view` 한 개다 |
-| `~/Library/Caches/vmq-view/status.json` | mod `vmq-view` 가 쓰는 `vmq status --json` · `claude agents --json --all` 의 stdout 캐시 |
-| `~/Library/Application Support/vmq/queue/` | 차례표 · `log`. 로컬 디스크에 둔다(SMB 에서는 원자적 `mkdir` 을 믿지 않는다). poieve 의 옛 경로 `~/Library/Application Support/Poieve-CloudLLM-VM/queue` 는 2026-10-12 01:31 에 이곳을 가리키는 심볼릭 링크로 바꿨다 |
-| `~/Library/Application Support/vmq/reservations.tsv` | 예약 · 우선순위(아래 「예약」). 세션 `vmq-main` 이 적고 mod `vmq-view` 와 각 세션이 읽는다. vmq 명령은 읽지 않는다 |
+| `vmq init` | Creates the data folder and an empty target list when absent |
+| `vmq target add <name> <mac> <roles> <os>` | Adds a target (creates the list when absent) |
+| `vmq target remove <name>` | Removes a target no turn holds or waits for |
+| `vmq list` | Lists the targets |
 
-## 규칙
+To change a target, remove it and add it again.
 
-| 항목 | 정한 것 |
+| Value | Rule | Example |
+|---|---|---|
+| name | Letters, digits, `. _ -`. Turns are kept under it, so keep it stable | `TestServer`, `Pixel8`, `MiniDesktop` |
+| mac | SSH address of the Mac the target is on, or any name for this Mac (`localhost`). Targets with the same value are on the same Mac for `@server+@client` | `localhost`, `mac-mini.local` |
+| roles | Words joined with `,`, or `-` for none. A role names targets that can do the same job: `vmq acquire @server` takes whichever is free first. A project name as a role lets a project's scripts pick theirs (`vmq_with_role myproject`) | `server,myproject` |
+| os | Operating system inside the target: `macOS`, `Windows`, `Linux`, or `-` for none | `macOS` |
+
+Asking in words works through the skill (`skills/queue/SKILL.md`, "Adding and removing targets"): Claude collects the four values, asks for what it cannot tell, runs `vmq target add` and shows `vmq list`.
+
+A build slot is a target with no operating system. To let at most two builds run at once, add two slots with one role and run builds through the queue:
+
+```sh
+vmq target add Build1 localhost build -
+vmq target add Build2 localhost build -
+vmq run @build -- make
+```
+
+`hosts.tsv` (optional, same folder) lists more addresses for a Mac, tried in order, for a Mac reachable on a direct link and on the LAN. See `examples/hosts.tsv`.
+
+## Settings
+
+### Plugin option
+
+Set at install, or later in `/config` under the vmq plugin.
+
+| Option | Default | What it does |
+|---|---|---|
+| `autoStartMain` | on | When a session starts, the target list holds a target, and no live session named `vmq-main` exists, the mod opens one in the background with `bin/vmq-main --if-absent`. It runs in permission mode `bypassPermissions` and may run `vmq force-release` on turns whose holding process is gone (see "The vmq-main session"). Turn it off to open it yourself with `/vmq-main` |
+
+While `autoStartMain` is on, stopping `vmq-main` lasts until the next session starts. To keep it closed, turn the option off.
+
+### Environment variables
+
+The CLI and library read these. For the mod, which runs `bin/vmq` from inside Claude Code, set them in the `env` of `~/.claude/settings.json`; for a project script, in its environment.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VMQ_DATA` | `~/Library/Application Support/vmq` | Data folder: target list, queue, reservations |
+| `VMQ_REGISTRY` | `$VMQ_DATA/resources.tsv` | Target list |
+| `VMQ_HOSTS_FILE` | `$VMQ_DATA/hosts.tsv` | More SSH addresses per Mac |
+| `VM_QUEUE_DIR` | `$VMQ_DATA/queue` | The queue. Keep it on a local disk: `mkdir` is the lock and is not trusted to be atomic on SMB |
+| `VM_QUEUE_LEASE` | 1200 | Seconds a turn lives after its last activity |
+| `VM_QUEUE_HOLD_MAX` | 3600 | Seconds a turn lives after its last control command while its holding process is alive |
+| `VM_QUEUE_STARVE` | 1800 | Seconds after which a waiting turn reserves free targets among its candidates |
+| `VM_QUEUE_OWNER` | `CLAUDE_CODE_SESSION_ID` | Owner name (letters, digits, `. _ -`). Give a subagent that drives a target on its own its own owner |
+| `VM_QUEUE_LABEL` | none | Label of a turn, same as `-l` |
+| `VM_QUEUE_TICKET` | none | Pins `vmq_require`, `vmq release` and the others to one turn key (`vmq ticket`) |
+| `VM_QUEUE_INTERNAL` | none | `1` skips the check, for a tool that runs itself again on another Mac |
+| `VMQ_SSH_RETRY_S` | 30 | Seconds `vmq_ssh` keeps retrying connections that end in the banner exchange |
+| `VMQ_REQUIRED_REF` | `main` | Branch `.vmq-required` is read from ("Rules") |
+
+## Commands
+
+| Command | What it does |
 |---|---|
-| 차례 | 대상을 바꾸는 명령(켜기 · 끄기 · 스냅숏 · 되돌리기 · 설치 · 화면 조작 · 화면 캡처 · 시험 실행)은 그 대상의 차례를 잡은 소유자만 실행한다. 대상을 다루는 프로젝트 도구가 제어 명령 앞에서 `vmq_require <대상>…` 를 부르고, 차례가 없으면 아무것도 하기 전에 종료 코드 1 로 거절한다 |
-| 도구의 판 | `vmq_require` 는 차례보다 먼저 부른 스크립트(`$ZSH_ARGZERO`)가 놓인 git 작업 트리를 본다. 그 저장소의 main 브랜치(`VMQ_REQUIRED_REF` 로 바꿈)에 `.vmq-required` 가 있으면 줄(`<커밋>\t<경로>\t<설명>`)마다 HEAD 가 그 커밋을 포함하거나 그 경로의 작업 트리 내용이 main 과 같아야 하고, 아니면 아무것도 하기 전에 종료 코드 1 로 거절하며 고치는 법(`merge main` · `checkout main -- <경로>`)을 쓴다. 저장소 · 파일이 없으면 검사하지 않는다. 오래전에 갈라진 작업 트리의 옛 도구에는 main 에서 고친 것(응답 없는 ssh 끊기 등)이 없지만, 옛 도구도 이 파일은 반드시 source 하므로 여기서 막는다(2026-10-23, poieve `task_1792779841439_8iolnc`). 목록을 main 에서 읽으므로 줄을 더하면 떠 있는 사슬에도 바로 걸린다. 더하기 전에 떠 있는 사슬의 작업 트리가 그 커밋을 가졌는지 본다 |
-| 소유자 | `VM_QUEUE_OWNER`, 없으면 Claude Code 의 `CLAUDE_CODE_SESSION_ID`. 하위 에이전트(Agent 도구)는 부모의 세션 ID 를 물려받으므로 따로 대상을 다루면 `VM_QUEUE_OWNER` 를 따로 정한다. 둘 다 없고 `DOGHOODIE_TERMINAL` 이 있으면(Doghoodie 탭의 셸) 그 탭을 연 Claude Code 세션의 id 다: `doghoodie ls --json` 에서 그 터미널의 `session` 이름 `cc-<세션 id 앞 8자리>[/<이름>]` 을 읽고, `claude agents --json` 의 살아 있는 세션 가운데 `sessionId` 가 그 8자리로 시작하는 것이 하나일 때 그 id 를 쓴다(`lib/vmq.zsh` 의 `vmq_owner_doghoodie`). 이름이 그 꼴이 아니거나 맞는 세션이 0개 · 2개 이상이면 stderr 에 이유를 쓰고 종료 코드 1 이다. 까닭: Doghoodie 의 PreToolUse 훅이 Bash 명령을 `doghoodie run --session cc-<8자리>` 로 돌리게 하는데, 그 탭의 셸은 Doghoodie 앱이 연 login 셸이라 `CLAUDE_CODE_SESSION_ID` 를 물려받지 않고 부모 프로세스에도 `claude` 가 없다. 2026-11-15 poieve 카드 세션 세 개가 그 탭에서 `vmq acquire` 가 「소유자가 없다」로 끝나 `VM_QUEUE_OWNER` 를 직접 넣었다 |
-| 요청 | `vmq acquire [-w 초] [-l 설명] <묶음>…`. 묶음마다 대상 하나를 받는다. 묶음은 이름 · 쉼표로 적은 후보(`A,B`) · 역할(`@server`) 중 하나다. 후보 중 먼저 비는 대상을 받는다. 후보 하나는 `+` 로 이은 대상 여럿일 수 있고(`A+B`), 그 대상이 모두 빌 때 함께 받는다. `+` 로 이은 부분에 역할이 있으면 같은 Mac(`resources.tsv` 둘째 열)의 대상끼리만 잇는다: `@server+@client` 는 Mac 마다의 서버 · 클라이언트 짝 중 먼저 비는 짝이다(2026-10-17, poieve `task_1792215878907_oe4o0d`). 두 Mac 의 VM 은 서로 다른 NAT 망이라 `@server @client`(묶음 두 개)로 받으면 Mac 이 섞인 짝이 나올 수 있었다. `+` 가 없는 옛 요청은 대상 하나짜리 후보로 그대로 읽는다. 받을 대상을 한꺼번에 잡으므로 하나를 잡은 채 다른 것을 기다리는 일(교착)이 없다. 잡은 뒤 더 받으려면 놓고 함께 다시 받는다 |
-| 배정 | 기다리는 차례를 일련번호 순으로 보며 묶음마다 빈 후보를 고른다. 채워지지 않은 차례는 건너뛰어, 앞 차례가 다른 대상을 기다리는 동안 뒤 차례가 빈 대상을 쓴다. 등록에서 `VM_QUEUE_STARVE` 초(기본 1800)가 지난 차례는 자기 후보 중 빈 대상을 맡아 둔다 |
-| 요청 바꾸기 | 기다리는 동안 다른 묶음으로 `acquire` 를 다시 실행하면 같은 순번으로 요청이 바뀐다(「바꿈」). 큐의 항목을 다른 대상으로 옮길 때 쓴다 |
-| 기다림 · 만료 | `acquire` 가 `-w` 초 안에 못 잡으면 종료 코드 75 이고 차례는 남는다. 같은 명령을 다시 실행해 이어서 기다린다. `-w N` 은 `acquire` 한 번의 기한이다. 시작할 때 기한 `EPOCHSECONDS + N`(N 이 0 이면 기한 없음) 하나를 정하고, 끝난 사슬의 차례가 없어지기를 기다리는 `register_wait` 와 잡기를 기다리는 `hold` 가 그 기한을 함께 쓴다. `hold` 는 기한이 지났어도 차례표를 한 번 확인한 뒤 75 를 돌려준다. `run` 은 기한이 없다. 고치기 전 판(`564311c`)은 두 함수가 N 초를 따로 세어 `acquire -w N` 이 최대 약 2N 초 기다렸다. 마지막 활동에서 `VM_QUEUE_LEASE` 초(기본 1200) 동안 활동이 없는 차례는 지워진다. 대상 여럿을 함께 잡은 차례(대상마다 차례 파일 하나)는 차례 단위로 판정한다(`lib/vmq.zsh` 의 `vmq_key_expiry`. `vmq_purge` 와 `vmq status`(문장 · `--json`)가 이 한 곳을 쓴다). 파일 하나라도 쥔 프로세스가 살아 있고 마지막 제어 명령 · 갱신에서 `VM_QUEUE_HOLD_MAX` 초가 지나지 않았으면(아래 「쥔 프로세스」) 그 차례의 파일을 모두 새로 적고, 모든 파일이 `VM_QUEUE_LEASE` 를 넘었을 때만 모두 지운다. 그래서 `vmq status` 가 찍는 마지막 활동 · 만료까지 남은 초는 그 차례의 파일 가운데 수정 시각이 가장 최근인 파일의 값이고, 같은 차례의 대상 줄은 모두 같은 값을 찍는다. `log` 에는 대상마다 「만료 <대상> <소유자> (마지막 활동 N초 전[, …])」 한 줄을 남긴다(`vmq ended` 가 이 형식을 읽는다). N 은 그 차례의 마지막 활동이라 같은 차례의 줄은 모두 같은 N 이다. 고치기 전 판은 파일마다 판정해, 파일들의 수정 시각이 다르면 `VM_QUEUE_LEASE` 를 넘은 파일만 지웠다. 그 차례가 남은 동안 `vmq status` 는 지워진 쪽 대상의 없는 파일을 읽다 `set -u` 로 끝났다(`Q_exp[4]: parameter not set`, 종료 코드 1). 그렇게 남은 차례는 `vmq status` 와 `vmq_holder_line` 이 그 차례의 남은 파일로 읽는다 |
-| 쥔 프로세스 | `vmq_require` 는 자기를 부른 셸 프로세스(`$$`, 스크립트면 그 스크립트)의 PID 와 시작 시각을 차례에 적는다. `vmq run` 은 명령이 도는 동안 자기를 적고, 명령이 돌아오거나 `vmq run` 이 TERM · INT · HUP 을 받으면 자기가 만든 차례(기다리던 요청 포함)를 놓는다. zsh 는 명령이 도는 동안 받은 신호의 trap 을 명령이 끝난 뒤 실행하므로 `vmq run` 에만 TERM 이 가면(`pkill -f`) 명령이 끝날 때 놓고, 프로세스 그룹에 가면(Claude Code 의 TaskStop) 명령과 함께 바로 놓는다. KILL 은 받을 수 없고 명령이 아직 도는지도 알 수 없어 아래 LEASE 로 지운다(2026-10-23, 신호로 끝난 run 의 SMB 빌드 차례가 1200초 남은 일이 두 번, poieve `bug_1792813277239_fyx5wg`). 적힌 프로세스가 살아 있으면 활동이 없어도 차례를 지우지 않고, 끝나면 그 뒤 `VM_QUEUE_LEASE` 초 안에 지운다. 마지막 제어 명령에서 `VM_QUEUE_HOLD_MAX` 초(기본 3600)가 지나면 프로세스가 살아 있어도 지운다(멈춘 스크립트가 차례를 끝없이 쥐지 않게). 3600 은 VM 을 다루지 않는 긴 한 단계인 poieve 앱 빌드(2026-10-16, 최근 빌드 기록 15개 중 14개가 1188초 이하)의 세 배쯤이다. 2026-10-16 에 한 단계가 1200초 넘게 제어 명령을 부르지 않은 실행 중인 묶음의 차례가 지워져, 다음 차례가 VM 을 되돌려 그 묶음이 깨졌다(poieve tracker `bug_1792137322422_fwsach`). 같은 PID 를 다른 프로세스가 다시 받아도 시작 시각이 달라 살아 있는 것으로 보지 않는다. 시작 시각은 `LC_ALL=C TZ=UTC` 로 고정해 읽는다(`ps -o lstart=` 는 부른 셸의 로캘 · 시간대로 적어, 적은 세션과 읽는 세션의 `LANG` · `TZ` 가 다르면 살아 있는 프로세스를 끝난 것으로 보았다, poieve tracker `bug_1792168576710_qdniti`). `vmq status` 가 「프로세스 … 가 살아 있어 만료되지 않음(마지막 제어 명령 · 갱신 N초 전, …)」 으로 보인다 |
-| 끝난 사슬의 차례 | 사슬은 차례를 한 번 받아 대상을 다루고 끝나는 셸이다. 프로젝트 도구가 `vmq_chain_mark <사슬 셸의 PID> <대상>…`(`lib/vmq.zsh`)로 잡은 차례에 그 셸의 PID 와 시작 시각을 `chain` 줄로 적는다(poieve 는 `vm_chain_guard` 가 부른다). 적힌 사슬이 끝난 차례는 같은 소유자의 `acquire` · `run` 에도 넘기지 않는다(`bin/vmq` 의 `register` 가 4 를 돌려준다). 그 사슬의 뒷정리(사슬이 끝난 뒤 그 차례로 VM 을 끄고 되돌린 다음 `vmq release` 하는 프로세스)가 아직 도는 중일 수 있다. 2026-10-22 에는 그 차례를 넘겨받은 다음 사슬의 VM 을 앞 사슬의 뒷정리가 끄고 되돌렸다(poieve tracker `bug_1792779968019_9ycb6f`). 그 `acquire` · `run` 은 2초마다 `register` 를 다시 부르며 기다리고, 그동안 그 차례 파일의 수정 시각(마지막 활동)을 새로 적지 않는다. 그래서 그 차례는 뒷정리가 놓으면 그때, 놓지 않으면 마지막 활동에서 `VM_QUEUE_LEASE` 초 뒤 만료로 지워진다. 차례에 적힌 프로세스가 살아 있는 동안은 위 「쥔 프로세스」 대로 지워지지 않는다. 지워진 뒤 기다리던 `acquire` · `run` 이 새 일련번호로 등록하므로, 먼저 기다리던 다른 소유자가 있으면 그 소유자가 먼저 받는다. `acquire` 는 `-w` 초 안에 그 차례가 지워지지 않으면 종료 코드 75 이고 새 차례를 만들지 않는다. 같은 소유자가 읽기만 하는 호출은 그 차례의 수정 시각을 새로 적지 않는다. `lib/vmq.zsh` 의 `vmq_chain_ended <키>`(키가 있고 · 잡혔고 · `chain` 줄이 있고 · 그 사슬이 `vmq_procs_alive` 로 살아 있지 않음)가 참이면 `vmq_sync <소유자>` 는 `vmq_settle <소유자>`(만료 정리 · 읽기 · 배정 · 잡기) 뒤 `vmq_touch <키>`(그 차례 파일의 수정 시각 적기)를 부르지 않는다. 그래서 `vmq mine` · `vmq_chain_of` · `acquire` · `run` 을 되풀이해 불러도 그 차례는 마지막 활동에서 `VM_QUEUE_LEASE` 초 뒤 만료된다. `register` 는 `vmq_sync` 뒤 같은 `vmq_chain_ended` 로 4 를 정한다. 그 차례 파일을 다시 쓰는 것(수정 시각도 바뀐다)은 그 차례에 제어 · 갱신을 적는 호출뿐이다: `vmq_require` 의 `vmq_attach`(뒷정리가 그 차례로 VM 을 끄고 되돌릴 때 이것이 성공해야 한다), `vmq_chain_mark`(`chain` 줄도 인자로 받은 PID 의 값으로 다시 적으므로 그 프로세스가 살아 있는 동안은 `register` 가 4 를 돌려주지 않는다), 성공한 `vmq_keepalive`. 그 호출이 `VM_QUEUE_LEASE` 초보다 짧은 간격으로 이어지는 동안은 그 차례가 만료되지 않는다. `ff27925` 에서는 `register` 도 시각을 늘 적어, 기다리는 `acquire` 가 2초마다 그 차례의 수정 시각을 새로 적었다. 차례에 적힌 프로세스 네 개가 모두 끝난 차례가 「마지막 활동 0초 전」 으로 남았고, 뒤에서 기다리던 다른 소유자가 받지 못했다(2026-11-11 08:55Z, 일련번호 2775). `564311c` 는 `register` 만 고쳐, 같은 소유자의 `vmq mine` · `vmq_chain_of` 등은 그 뒤에도 그 차례의 수정 시각을 적었다 |
-| 활동 갱신 | 제어 명령 없이 오래 기다리는 프로세스는 `vmq_keepalive`(`lib/vmq.zsh`)로 상한의 시작점(`active`)을 지금으로 다시 적는다. 이 소유자가 잡은 차례의 procs 에 부른 셸(`$$`)이 살아 있는 것으로 적혀 있을 때만 적고 종료 코드 0 이다. 차례를 잃었으면(차례 없음 · 아직 기다림 · procs 에 `$$` 가 없음 · `VM_QUEUE_TICKET` 이 다름 · 소유자 없음) 적지 않고 stderr 에 이유를 쓰고 1, 차례표 잠금을 얻지 못한 일시 실패면 75 다(차례는 그대로이고 다음 호출에서 다시 갱신한다). 2026-11-13 사용자 승인으로 나눴다. 전에는 둘 다 1 이고 차례를 잃은 경우는 stderr 가 비어 부르는 쪽이 가르지 못했다(doghoodie-main 보고. rea_cathode 의 `tools/studio_keepalive.zsh` 는 1 이면 끝내서 잠금 경합 한 번에 시험을 끝낼 수 있었다). 차례를 잃은 뒤 대상을 더 다루지 않으려는 스크립트는 `vmq_keepalive_or_exit` 를 부른다: 1 이면 stderr 에 쓰고 `exit 1`, 75 면 경고만 쓰고 0 이다. 스크립트의 최상위 셸에서 부른다. `$(...)` · 파이프 · `( )` 안에서는 `exit` 가 그 서브셸만 끝낸다(zsh 에서 서브셸의 `$$` 는 바깥 셸의 PID 라 갱신 자체는 된다). `vmq_keepalive` 가 차례 파일을 다시 쓰는 것은 성공할 때의 `vmq_write` 하나라, 거절이면 `vmq_keepalive` 는 차례 파일을 쓰지 않는다. 다만 앞에서 부르는 `vmq_settle` 의 공통 정리는 차례표를 읽는 다른 명령과 같이 거절이어도 차례 파일을 바꾼다: `vmq_purge` 는 쥔 프로세스가 살아 있고 상한이 지나지 않은 차례의 수정 시각을 새로 적고(위 「쥔 프로세스」), `vmq_commit` 은 이 소유자의 대기 차례가 배정되어 있으면 잡는다(`held` 줄 · `log` 「잡음」). 고치기 전 판(`564311c`)은 `vmq_sync` 를 불러 거절할 때도 그 소유자 차례의 수정 시각을 새로 적었다. `VM_QUEUE_TICKET` 이 지금 차례와 다를 때도 1 이다(아래 「차례 고정」). 그래서 다른 소유자(세션)도, 같은 소유자라도 `vmq_require` 로 차례에 적히지 않은 프로세스도 남의 차례를 늘리지 못한다. 부르는 간격은 `VMQ_KEEPALIVE`(`VM_QUEUE_HOLD_MAX` 의 1/6, 기본 600초) 한 곳에서 정한다. 갱신이 다섯 번 잇달아 실패해야 상한에 걸린다. 부르는 프로세스가 끝나면 갱신도 멈춰 위 「쥔 프로세스」 규칙이 그대로 걸린다. 살아 있지만 멈춘 프로세스가 갱신을 끝없이 잇지 않게 하는 것은 부르는 쪽의 몫이다. poieve 는 사슬 단계 함수 `chain_step` 의 기다림 반복 한 곳에서만 부르고, 그 반복은 단계 한도에서 끝나므로 갱신이 이어지는 시간은 사슬에 적힌 단계 한도의 합을 넘지 않는다(CloudLLM `README.md` §7 「VM 사슬의 단계」). 2026-10-28 에 poieve car7gz 사슬의 한 단계(`waitc` 3600초, VM 안에서 조건을 보는 ssh 한 번)가 제어 명령 없이 상한 3600초에 다가가 사슬이 도는 중에 차례가 지워질 수 있었다(poieve tracker `task_1793209230273_b2regj`, 2026-10-16 `bug_1792137322422_fwsach` 와 같은 일) |
-| 차례 고정 | 환경 변수 `VM_QUEUE_TICKET` 에 차례 키(`<10자리 일련번호>-<소유자>`. `vmq ticket` 이 찍는 값이고 `status --json` 의 `key` 와 같다)를 주면 `vmq_require` · `vmq_keepalive` · `vmq_chain_of` · `vmq_chain_mark` · `vmq release` · `vmq mine` 은 그 키가 이 소유자의 지금 차례 키일 때만 전처럼 동작한다. 다르거나 차례가 없으면 그 차례에 아무것도 하지 않고(차례 파일의 내용 · 수정 시각이 그대로다. `vmq_settle` 의 만료 정리 · 잡기는 예외) stderr 에 「제어 대상 큐: VM_QUEUE_TICKET 의 차례가 이 소유자의 지금 차례가 아니어서 거절한다(아무것도 하지 않았다). 소유자 <소유자>, 고정한 키 <키>, 지금 키 <키 또는 없음>」 을 쓰고 종료 코드 1 이다(`lib/vmq.zsh` 의 `vmq_ticket_ok`). 비었거나 없으면 모든 동작이 전과 같다. `vmq ticket` 은 이 소유자의 차례 키(잡았든 기다리든)를 한 줄로 찍고 0, 없으면 stderr 에 쓰고 1 이다. 조회라 그 차례의 시각을 새로 적는 `vmq_touch` 를 부르지 않고 `vmq_settle` 만 부른다. `vmq_settle` 의 만료 정리 · 잡기는 다른 조회와 같이 걸린다: 이 소유자의 대기 차례가 배정되어 있으면 잡고(`held` 줄 · `log` 「잡음」), 쥔 프로세스가 살아 있는 차례는 `vmq_purge` 가 수정 시각을 새로 적는다. `acquire` · `run` · `status` · `ended` · `force-release` · `list` · `peek-check` · `ticket` 은 이 값을 보지 않는다(`bin/vmq` 가 `mine` · `release` 밖의 명령에서 지운다). `run` 은 지운 뒤 명령을 실행하므로, 자기 차례를 놓는 `vmq release` 가 바깥에서 물려받은 값으로 거절되지 않고 명령에도 그 값이 물려지지 않는다. 까닭: `vmq_require` · `vmq release` 는 소유자 단위로 판정해, 차례가 만료 · 강제로 놓음으로 지워진 뒤 같은 소유자가 새 차례를 받으면 앞 차례의 뒷정리가 부른 `vmq_require` · `vmq release` 가 새 차례에 적용되었다. poieve 는 아직 쓰지 않는다. 채택할 자리는 `tools/lib/common.zsh` 의 `vm_chain_watch` 안 두 곳이다. ① 감시가 처음 부르는 `vmq_require`(사슬 셸이 살아 있어 그 차례가 그 사슬의 차례인 때)가 성공한 바로 뒤 `export VM_QUEUE_TICKET=$("$VMQ_HOME/bin/vmq" ticket)`. 그러면 사슬이 끝난 뒤의 `vmq_require`, VM 을 다루는 `tools/vm.sh` 안의 `vmq_require`(export 한 값은 자식 프로세스에 물려진다. `tools/vm.sh` 가 환경 변수를 지우지 않는지는 확인하지 않았다), `vm_chain_release` 의 `vmq release` 가 그 차례에만 적용된다. 그 차례가 지워지고 같은 소유자가 새 차례를 받았으면 사슬이 끝난 뒤의 `vmq_require` 가 1 이라 `vmq ended` 로 가르는 분기로 간다. ② 그 분기에서 차례를 다시 받는 `vmq acquire`(이 값을 보지 않는다)의 종료 코드가 0 · 75 이면 `vmq ticket` 이 찍은 키로 다시 고정한다. 그래야 받은 차례의 정리와, 받지 못해 남은 등록을 지우는 `vm_chain_release` 가 그 차례에 적용된다. 종료 코드가 1 이면(이 소유자가 다른 대상의 차례를 잡았다) 다시 고정하지 않는다. 그 차례는 다른 사슬의 것이라 ① 의 키로 거절되어야 한다. `vmq_chain_of` 대조 뒤에 고정하면 늦다. 감시가 사슬이 끝난 뒤의 `vmq_require` 를 부르기 전에 옛 차례가 지워지고 같은 소유자가 `chain` 줄 없는 새 차례를 받으면, 그 `vmq_require` 가 새 차례로 성공하고 `vmq_chain_of` 가 빈 값을 찍어 대조를 지나므로 새 차례를 고정했다(아래 시험 「차례 고정」) |
-| status --json | 실제 차례표의 복사본 세 벌(`VM_QUEUE_DIR`)에 고치기 전(main) · 뒤 판의 `vmq status` 와 `vmq status --json` | 2026-11-10 23:5x UTC: 초 값을 지운 문장 출력이 두 판에서 같음, JSON 이 `python3 -m json.tool` 로 읽히고 요청 아홉 건 · 대상 아홉 개가 문장 출력과 맞음, `--json PoieveServer` 는 그 대상과 그 대상의 차례만. 처음 판은 대상 둘 이상에 걸친 차례 네 건을 빠뜨렸다(zsh `${#${a:*b}}` 가 원소 둘 이상이면 0). 같은 판으로 동시 실행 대상마다 최대 동시 1, 읽기 판별 51가지, 쥔 프로세스 · 상한 11가지, 짝 15가지, run 의 신호 6가지 모두 맞음. `vmq_expiry` 에서 상한 비교를 뺀 깬 복사본은 쥔 프로세스 · 상한 시험 ④ 두 가지가 틀림 |
-| 받은 대상 | 「잡음」 줄, `vmq mine`(묶음 순서), `vmq run … -- <명령>` 의 환경 변수 `VM_QUEUE_GRANTED` |
-| 차례 없는 읽기 | 상태만 읽는 명령(프로세스 · 파일 · 로그 · 설정 · DB 값)은 차례 없이 실행한다. 읽기인지는 `lib/peek.zsh` 의 목록(명령 · 인자 규칙)이 판별하고, 명령을 잇거나 파일에 쓰는 문법(`;` · `&` · `>` · `<` · 역따옴표 · `$(` · 줄바꿈)과 목록 밖의 명령은 대상에 접속하기 전에 거절한다. 첫 낱말은 이름이나 `/usr/bin` · `/bin` · `/usr/sbin` · `/sbin` 의 절대 경로이고, 그 밖의 절대 경로는 거절한다. `log` 는 `/usr/bin/log` 로만 받는다. 대상의 셸이 zsh 라 이름으로 부르면 zsh 의 내장 명령 `log` 가 불려 `zsh:log:1: too many arguments` 로 끝난다(2026-10-12 까지는 판별이 이름을 받고 실행은 늘 실패했다). 다른 소유자가 잡은 대상에서 읽은 값은 그 소유자가 다루는 도중의 상태이므로 시험 근거로 쓰지 않는다 |
-| 기록 | 등록 · 바꿈 · 잡음 · 놓음 · 만료 · 강제로 놓음을 차례표의 `log` 에 한 줄씩 남긴다. 프로젝트 도구가 되돌림 같은 상태 변화를 `vmq_log` 로 더한다. `vmq ended <vm>` 은 이 기록에서 내 그 VM 차례가 마지막에 끝난 사건(`놓음` · `만료` · `강제로놓음`) · 시각 · 그 뒤 그 VM 을 잡은 다른 소유자(없으면 `-`)를 한 줄로 찍는다(그 뒤 내가 다시 잡았거나 끝난 차례가 없으면 종료 코드 1). 기록의 형식은 vmq 가 갖고, 프로젝트 도구는 `log` 를 직접 읽지 않고 이 명령을 부른다. poieve 의 `vm_chain_guard` 가 사슬이 놓은 것과 만료로 지워진 것을 이것으로 가른다(poieve tracker `bug_1792774871149_2f64d4`) |
+| `vmq acquire [-w s] [-l label] <group>…` | Takes a turn, one candidate per group. Waits 90 s by default; exit 75 means still waiting (run it again) |
+| `vmq release [<target>…]` | Releases my turn, or only those targets |
+| `vmq run [-l label] <group>… -- <command…>` | Takes a turn, runs the command with `VM_QUEUE_GRANTED`, releases (also on TERM, INT, HUP) |
+| `vmq status [--json] [<target>…]` | Holder and waiting owners per target |
+| `vmq mine` · `vmq ticket` | The targets I hold · my turn key |
+| `vmq ended <target>` | How my last turn on it ended: `released`, `expired` or `force-released`, the time, and who took it next |
+| `vmq force-release <target>` | Removes the turn that holds it. Only when the user says so, or `vmq-main` for a turn whose process is gone |
+| `vmq list` · `vmq init` · `vmq target add` · `vmq target remove` | The target list ("Targets") |
+| `vmq peek-check '<command line>'` | Whether a read may run without a turn |
+| `/vmq` · `/vmq-main` | Opens the pane · opens the `vmq-main` session |
+
+A group is a target name, comma-separated candidates (`Server1,Server2`), a role (`@server`), or targets joined with `+` that are taken together (`Server2+Client2`). `@server+@client` takes a server and a client on the same Mac. Exit codes: 0 done, 1 refused or error, 2 usage, 75 waiting.
+
+## Using it in a project script
+
+Scripts that drive a target source the library and call `vmq_require` before each control command:
+
+```zsh
+source "${VMQ_HOME:-$(dirname "$(command -v vmq)")/..}/lib/vmq.zsh"
+vmq_require TestServer || exit 1
+# ... drive TestServer ...
+```
+
+`command -v vmq` works in a shell a Claude Code session started (the plugin's `bin/` is on its PATH). Elsewhere set `VMQ_HOME` to the plugin folder.
+
+1. Call `vmq_require <target>…` for every target at the start, so a script is not refused halfway and does not leave a target half changed. While the script's process lives, its turn does not expire for `VM_QUEUE_HOLD_MAX` seconds after its last control command.
+2. A step that waits long without control commands calls `vmq_keepalive` every 600 s. A script that calls `vmq_require` only at the start calls `vmq_keepalive_or_exit` between long steps, so it stops when its turn is lost.
+3. Read commands that may run without a turn go through `source .../lib/peek.zsh` and `peek_allowed "<command line>"` before connecting.
+4. A script that runs itself again on another Mac sets `VM_QUEUE_INTERNAL=1` there: the check already happened on this Mac, and the queue is on this Mac only.
+5. `vmq_ssh <address> …` runs ssh with `VMQ_SSH_BASE` (BatchMode, ConnectTimeout 5, ServerAlive 15 × 4), the addresses in `hosts.tsv`, and retries on a banner exchange timeout.
+
+## Rules
+
+| Item | Rule |
+|---|---|
+| Turn | Commands that change a target (start, stop, snapshot, restore, install, drive the screen, capture the screen, run tests) run only for the owner that holds its turn. The project tool calls `vmq_require <target>…` before each and exits 1 when refused |
+| Request | One request per owner. Each group gets one target; the candidate free first is given; a `+` candidate is given when all its targets are free. All targets are taken at once, so nobody holds one and waits for another (no deadlock). To get more after taking, release and acquire together. While waiting, `acquire` with other groups changes the request under the same sequence number |
+| Assignment | Waiting turns are read in sequence order and each group gets a free candidate. A turn that cannot be filled is skipped, so later turns can use free targets. A turn waiting longer than `VM_QUEUE_STARVE` reserves the free targets among its candidates |
+| Expiry | A turn idle for `VM_QUEUE_LEASE` seconds is removed. `vmq_require` writes the calling shell's PID and start time into the turn; while that process lives the turn is kept, up to `VM_QUEUE_HOLD_MAX` seconds after its last control command or `vmq_keepalive`. Start times are read with `LC_ALL=C TZ=UTC`, so a reused PID is not taken as alive |
+| Ended chains | A chain is a shell that takes a turn once, drives targets and ends; `vmq_chain_mark <pid> <target>…` writes it into the turn. A turn whose chain ended is not handed even to the same owner's next `acquire` until its cleanup releases it or it expires, so the cleanup never acts on the next chain's targets |
+| Pinning | With `VM_QUEUE_TICKET=<key>`, `vmq_require`, `vmq_keepalive`, `vmq_chain_of`, `vmq_chain_mark`, `vmq release` and `vmq mine` act only on that turn, so a cleanup cannot act on a newer turn of the same owner |
+| Tool version | When the calling script is in a git work tree whose `main` has `.vmq-required` (lines `<commit>\t<paths>\t<note>`), `vmq_require` refuses unless HEAD contains each commit or those paths equal `main`. An old work tree's tool then cannot drive targets without a fix that landed on `main` |
+| Reads without a turn | `lib/peek.zsh` lists read commands and their argument rules. Chaining or writing syntax (`;`, `&`, `>`, `<`, backquotes, `$(`, newlines) and commands not listed are refused before connecting. Values read on a target another owner holds are that owner's state mid-work, not test evidence |
+| Log | `$VM_QUEUE_DIR/log` gets a line for `registered`, `changed`, `held`, `released`, `expired`, `force-released`, `chain`, `target-added` and `target-removed`. Tools read it through `vmq ended`, not directly |
 
 ## status --json
 
-`vmq status --json [<대상>…]` 은 `vmq status` 와 같은 잠금 · 만료 · 배정(`vmq_purge` · `vmq_scan` · `vmq_plan`)을 거친 뒤 JSON 객체 한 개를 stdout 에 찍는다. 문장 출력과 만료 판정은 `lib/vmq.zsh` 의 `vmq_key_expiry`(차례 단위) 한 곳을 쓴다. 프로그램이 큐를 읽을 때는 문장 출력을 해석하지 않고 이것을 부른다. 문장은 사람용이라 바뀔 수 있다.
+`vmq status --json [<target>…]` prints one JSON object after the same lock, expiry and assignment as `vmq status`. Programs read this, not the text output.
 
-| 필드 | 값 |
+| Field | Value |
 |---|---|
-| `version` | 형식 판. 지금 1. 필드를 지우거나 뜻을 바꾸면 올린다 |
-| `now` · `lease` · `holdMax` · `starve` | 판정한 시각(epoch 초)과 그때의 `VMQ_LEASE` · `VMQ_HOLD_MAX` · `VMQ_STARVE`(초) |
-| `owner` | 부른 쪽의 소유자(`VM_QUEUE_OWNER` · `CLAUDE_CODE_SESSION_ID` · Doghoodie 탭이면 그 탭을 연 세션의 id, 위 「소유자」). 없으면 `null` |
-| `targets[]` | 대상마다 `name` · `host` · `roles[]` · `os`(`resources.tsv` 넷째 열, `-` 이면 `null`) · `holder`(잡은 차례의 키 또는 `null`) · `assigned`(기다리던 차례가 다음 확인에서 잡을 키) · `reserved`(`VMQ_STARVE` 가 지난 차례가 맡아 둔 키) · `waiting[]`(기다리는 차례의 키, 차례표 순서) |
-| `requests[]` | 차례(요청)마다 한 개. 인자로 준 대상에 차례 파일이 있는 것만 낸다. `key`(`<일련번호>-<소유자>`) · `seq` · `owner` · `isMine` · `label` · `need[]`(묶음마다 한 개, 묶음 안은 `,` 로 이은 후보, 후보 안은 `+` 로 이은 대상) · `targets[]`(차례 파일이 있는 대상) · `held[]`(잡은 대상, 기다리면 빈 배열) · `assigned[]`(배정되어 다음 확인에서 잡을 대상) · `created` · `active`(epoch 초, 없으면 0) · `procs[]` · `alive[]`(그 가운데 지금 살아 있는 것) · `expiry` |
-| `expiry` | 차례 단위 판정이다(`vmq_key_expiry`). `basis` 가 `holdMax` 면 그 차례의 파일 가운데 하나라도 쥔 프로세스가 살아 있어 `active` 에서 `holdMax` 초에 만료되고, `lease` 면 마지막 활동(그 차례의 파일 가운데 가장 최근 수정 시각)에서 `lease` 초에 만료된다. `seconds` 는 만료까지 남은 초, `since` 는 그 기준 시각에서 지난 초다 |
+| `version` | Format version, now 1 |
+| `now` · `lease` · `holdMax` · `starve` | Time of the judgement (epoch seconds) and the limits in seconds |
+| `owner` | The caller's owner, or `null` |
+| `targets[]` | Per target: `name`, `host`, `roles[]`, `os` (`null` for `-`), `holder` (key or `null`), `assigned`, `reserved`, `waiting[]` |
+| `requests[]` | Per turn with a file on the given targets: `key` (`<sequence>-<owner>`), `seq`, `owner`, `isMine`, `label`, `need[]`, `targets[]`, `held[]`, `assigned[]`, `created`, `active`, `procs[]`, `alive[]`, `expiry` |
+| `expiry` | `basis` `holdMax` (a holding process is alive; expires `holdMax` seconds after `active`) or `lease` (expires `lease` seconds after the last activity); `seconds` left; `since` seconds since that start |
 
-소유자 이름은 vmq 가 아는 값 그대로다. Claude Code 세션 이름 · 프로젝트로 바꾸는 일은 mod `vmq-view` 가 `claude agents --json --all` 로 한다(vmq 는 Claude Code 를 모른다). `vmq run @smbbuild` 가 만든 소유자는 `smbbuild-<세션 id>-<PID>` 꼴이다.
+## Reservations
 
-## 세션 vmq-main
+`$VMQ_DATA/reservations.tsv` holds reservations and priorities. The `vmq` command does not read it; sessions read it before choosing a target, the mod judges turns against it, and `vmq-main` writes it. One line per reservation, seven tab-separated columns; lines starting with `#` and blank lines are skipped.
 
-`vmq-main` 은 큐를 지켜보는 background 세션 한 개다. 큐는 이 세션 없이 돈다. 차례를 받고 놓고 만료시키는 일은 각 세션과 vmq 명령이 하고, `vmq-main` 은 예약을 적고, 예약에 어긋난 차례를 그 프로젝트 관리 세션에 알리고, 쥔 프로세스가 죽은 차례를 놓는다(2026-11-11 사용자: 「vmq 운영 자체는 세션과 상관 없고 vmq-main은 그저 모니터링과 중간 인터럽트 개념의 관리기능일 뿐이야.」). 역할 · 판정 처리 · 권한의 원본은 `VMQ-MAIN.md` 다.
+| Column | Value |
+|---|---|
+| 1 kind | `only`: only sessions under the project path hold or wait for these targets. `max`: sessions under the project path hold at most column 4 of these targets at once |
+| 2 targets | Target names joined with `,` |
+| 3 project path | Absolute. A session whose working folder is this path or below it belongs to the project |
+| 4 number | The limit for `max`; `-` for `only` |
+| 5 start · 6 end | UTC ISO 8601 (`2026-11-11T15:00Z`). `vmq-main` removes a line past its end |
+| 7 reason | Who set it and when |
+
+An owner without a session id (`VM_QUEUE_OWNER=build-1`) has no project, so its turns are not judged.
+
+## The mod
+
+Every 30 s the mod reads `vmq status --json`, `claude agents --json --all` and `reservations.tsv`, and adds the session name, project and verdicts to each turn. It does not change the queue. The two commands' stdout is cached in `~/Library/Caches/vmq/status.json` for 25 s and shared by sessions, because `vmq status` holds the queue lock for about 2 s.
+
+| Where | What |
+|---|---|
+| Status line | `vmq held <n> · waiting <n> · violations <n>`, plus `no process`, `expiring` and `ended reservations` counts when there are any |
+| Pane (`/vmq`) | One row per turn: state, session, project, targets, operating system, expiry, verdicts; the label below. Violations red, no process yellow, expiring cyan |
+| pane-grid cell | With [pane-grid](https://github.com/hwanyong/pane-grid) installed, `vmq` can be placed in a grid cell |
+| Toast | New verdicts, for 8 s |
+
+| Verdict | When |
+|---|---|
+| `violation` | An `only` line's targets held or waited for by a session outside its project, or a `max` line's limit passed (later turns in sequence order) |
+| `dead` | Holds targets, no live holding process, basis `lease`, idle over 120 s, and the owning session is not busy |
+| `expiring` | Holds targets, basis `lease`, 300 s or less left, not `dead` |
+
+The first read after the mod loads only fills the list. After that, new verdicts show a toast, and in the session named `vmq-main` they are also sent to the model as a `[vmq]` prompt. That prompt holds only values the mod makes (verdict kind, sequence number): labels, session names and reservation reasons are written by other sessions and would otherwise reach `vmq-main`, which may run `vmq force-release`, as instructions.
+
+## The vmq-main session
+
+`vmq-main` is one background session that watches the queue. The queue works without it. It writes reservations, tells a project's main session about turns that break them, warns about turns about to expire, and force-releases turns whose holding process is gone. Its role is `VMQ-MAIN.md`, which the mod adds to the system prompt of the session named `vmq-main` on every request, so it survives `/clear` and compaction.
+
+It opens automatically (`autoStartMain`), with `/vmq-main`, or with `vmq-main` in a shell. `bin/vmq-main` checks for a live `vmq-main` under a lock, so sessions starting together open one. It opens with name `vmq-main` (other sessions send to it by name), permission mode `bypassPermissions` (messages from sessions in another mode would wait for approval) and working folder `$VMQ_DATA`. If a second session gets the same name, the later one gets a warning in place of the role.
+
+## Tests
+
+The tests make their own queue and target list under the folder you give.
 
 ```sh
-~/.claude/tools/vmq/bin/vmq-main
+zsh tests/peek.zsh                                        # read check: 18 reads pass, 33 commands refused
+zsh tests/stress.zsh bin/vmq "$TMPDIR/vmq-s" "$TMPDIR/vmq-s.out"   # 10 owners at once: at most 1 per target
+zsh tests/pair.zsh bin/vmq "$TMPDIR/vmq-p"                 # server+client pairs on one Mac (15 checks)
+zsh tests/keepalive.zsh bin/vmq "$TMPDIR/vmq-k"            # expiry with a live holding process (11 checks, about 2 min)
+zsh tests/run-signal.zsh bin/vmq "$TMPDIR/vmq-r"           # vmq run ended by TERM, KILL (6 checks)
 ```
 
-이 명령으로 연다. 이름 `vmq-main` · 권한 모드 `bypassPermissions` · cwd `~/.claude/tools/vmq` 로 열고, 같은 이름의 세션이 이미 있으면 열지 않고 종료 코드 1 로 끝난다. 역할 지시문은 SessionStart 훅 `.claude/hooks/vmq-main-start.zsh` 가 시작 · `/clear` · compact · resume 때마다 넣는다. 그래서 `/clear` 한 뒤에도 역할이 남고, Mac 을 다시 시작해 세션이 없어졌으면 이 명령을 다시 실행하면 된다. 다른 세션은 이름 `vmq-main` 으로 보낸다(`~/.claude/CLAUDE.md` §18). 값마다 맞추는 이유는 `VMQ-MAIN.md` 「여는 법」 절에 있다.
+Each exits 0 when every check is right. When you change the queue, also break the changed line in a copy and see the test fail before trusting it.
 
-## 예약
+## License
 
-예약 · 우선순위는 `~/Library/Application Support/vmq/reservations.tsv` 한 파일에 둔다. 2026-11-10 사용자 결정(세션 `vmq-main`). vmq 명령은 이 파일을 읽지 않고 배정도 바꾸지 않는다. 예약을 지키는 것은 각 세션이 대상을 고르기 전에 이 파일을 읽는 것과, 어긋난 차례를 `vmq-main` 이 그 프로젝트 관리 세션에 알리는 것이다(`~/.claude/CLAUDE.md` §18).
-
-줄마다 탭으로 나눈 일곱 칸이다. `#` 으로 시작하는 줄과 빈 줄은 읽지 않는다.
-
-| 칸 | 값 |
-|---|---|
-| 1 종류 | `only`: 그 대상은 프로젝트 경로 아래 세션만 잡고 기다린다. `max`: 프로젝트 경로 아래 세션이 그 대상 가운데 동시에 잡는 수가 넷째 칸 이하다 |
-| 2 대상 | `resources.tsv` 의 이름을 `,` 로 이은 것 |
-| 3 프로젝트 경로 | 절대 경로. 차례 소유자 세션의 cwd 가 이 경로이거나 그 아래면 그 프로젝트다 |
-| 4 수 | `max` 의 상한. `only` 는 `-` |
-| 5 시작 · 6 끝 | UTC 의 ISO 8601(`2026-11-11T15:00Z`). 끝이 지난 줄은 `vmq-main` 이 지운다 |
-| 7 근거 | 누가 언제 정했나(사용자 지시 원문) |
-
-소유자가 세션 id 를 담지 않으면(`VM_QUEUE_OWNER=k126-build` 처럼 직접 정한 이름) 프로젝트를 알 수 없어 판정하지 않는다.
-
-## mod vmq-view
-
-`mod/vmq-view/` 는 Claude Code mod(hooks 모듈 `hooks/register.tsx` 가 있는 plugin)다. 30초마다 `vmq status --json` · `claude agents --json --all` 의 stdout 과 `reservations.tsv` 를 읽어 차례마다 세션 이름 · 프로젝트 · 예약 판정을 붙여 보인다. 큐와 `reservations.tsv` 는 바꾸지 않는다. vmq 명령은 이 mod 를 모른다.
-
-| 자리 | 보이는 것 |
-|---|---|
-| status line | `vmq 잡음 <n>건 · 대기 <n>건 · 예약 위반 <n>건`. 그런 차례 · 줄이 있으면 `프로세스 없음 <n>건` · `만료 임박 <n>건` · `끝난 예약 <n>줄` 을 더한다. 읽기가 실패하면 `vmq 읽기 실패: <오류 메시지>`(종료 코드와 stderr 첫 줄) |
-| pane `vmq` | `/vmq` 가 연다. 첫 줄은 읽은 시각(UTC)과 status line 의 글자다. 끝난 예약 줄 · `reservations.tsv` 에서 읽지 못한 줄 수를 노랑으로 보이고, 그 아래는 열을 맞춘 표다. 머리 줄(흐리게) 다음에 차례마다 두 줄을 보인다: 첫 줄은 상태(잡음 · 배정 · 대기) · 세션 이름 · 프로젝트 · 대상 · 운영체제(그 대상들의 `os` 를 겹치지 않게 이은 것, 없으면 `-`) · 만료까지 남은 분(`상한` 또는 `lease`) · 판정, 둘째 줄은 들여 쓴 설명(label, 흐리게)이다. 열 폭은 그 열에서 가장 넓은 값이고 열마다 상한이 있어 넘는 값은 끝을 자른다(`register.tsx` 의 `COLUMNS`). 예약 위반이 있는 줄은 빨강, 프로세스 없음 줄은 노랑, 만료 임박 줄은 청록이다 |
-| pane-grid 칸 | plugin `pane-grid` 가 설치되어 있으면 그 grid 의 빈 칸에 `vmq-view` 를 고를 수 있다. 칸에 놓인 동안에는 pane `vmq` 를 닫고, `/vmq` 는 pane 을 여는 대신 그 탭 · 칸 이름을 알린다 |
-| toast | 판정이 새로 생기면 8초 동안 첫 판정과 나머지 건수 |
-
-판정은 `hooks/model.ts` 가 낸다.
-
-| 판정 | 조건 |
-|---|---|
-| `only` 위반 | 그 줄의 대상을 잡거나 기다리는 차례의 세션 cwd 가 프로젝트 경로 밖이다 |
-| `max` 위반 | 프로젝트 경로 아래 세션이 그 줄의 대상을 쥔 차례를 일련번호 순으로 셌을 때 상한을 넘는 뒤쪽 차례다 |
-| 프로세스 없음 | 대상을 잡았고 `alive[]` 가 비었고 `expiry.basis` 가 `lease` 이고 `expiry.since` 가 120초를 넘었고, 주인 세션의 `claude agents --json --all` `status` 가 `busy` 가 아니다(`idle` · `waiting` · `null`). 짧은 명령마다 차례를 갱신하는 세션은 명령 사이에 살아 있는 프로세스가 0개라 이 조건 없이는 오탐이 났다(seq 2704, 2026-11-11 사용자 결정 「응, 그 조건 더해」). 주인 세션을 찾지 못하면(소유자에 세션 id 가 없거나 agents 에 없음) 프로세스 조건만으로 본다 |
-| 만료 임박 | 대상을 잡았고 `expiry.basis` 가 `lease` 이고 `expiry.seconds` 가 300초 이하이며 프로세스 없음이 아니다. `holdMax` 기준은 보지 않는다. 그동안 `vmq_purge` 가 차례 파일을 touch 해 상한이 지나면 기준이 `lease` 로 바뀌고 그때부터 `VMQ_LEASE` 초 뒤에 지워지므로, 차례를 지우는 것은 `lease` 판정뿐이다. 300초는 알림이 `vmq-main` · 관리 세션 · 카드 세션을 거쳐 전달되는 시간을 두려고 정한 값이다(재지 않은 정책값, `model.ts` 의 `EXPIRING_WITHIN`) |
-| 판정 못 함 | 소유자에서 세션 id 를 뽑지 못했거나 `claude agents` 에 그 세션이 없다. 알리지 않는다 |
-
-세션 이름과 cwd 는 소유자에서 뽑은 세션 id 를 `claude agents --json --all` 의 `sessionId` 와 대조해 얻는다. 프로젝트 이름은 cwd 에서 `/.claude/worktrees/<이름>` 을 뗀 마지막 디렉터리 이름이다. 소유자가 `smbbuild-` 로 시작하면 세션 이름 뒤에 `빌드` 를 붙인다.
-
-| 규칙 | 정한 것 |
-|---|---|
-| 공유 캐시 | 두 명령의 stdout 을 `~/Library/Caches/vmq-view/status.json` 에 함께 적는다. 이 파일의 수정 시각이 25초(`CACHE_MS`) 안이면 명령을 부르지 않고 이 파일을 읽는다. `vmq status` 는 큐 잠금을 쥔 채 약 2.2초 돌므로 세션마다 30초마다 부르면 세션 수만큼 잠금을 쥔다 |
-| 첫 폴링 | mod 를 로드한 뒤 처음 성공한 읽기는 판정 목록만 채우고 toast · prompt 를 내지 않는다(2026-11-11 사용자 결정 「첫 폴링은 알리지 말고 목록만 채워」). 읽기 실패는 성공으로 세지 않는다 |
-| 모델에 넘기기 | 새 판정이 있을 때 `$.prompt.submit` 은 세션 이름이 `vmq-main` 일 때만 부른다. 넘기는 글에는 mod 가 만든 값만 넣는다: 판정마다 `seq <일련번호> <violation · dead · expiring>` 한 줄, 끝난 예약은 줄 수, 그리고 처리는 `VMQ-MAIN.md` 「판정 처리」 절을 따르라는 한 줄. 처리 차례(세부 확인 · label 을 데이터로만 읽기 · 판정별 처리)는 그 절에만 적는다. 다른 세션은 status line 과 toast 만 쓴다 |
-| 자유 문자열 | 차례의 label(`vmq acquire -l`), 세션 이름(`claude agents` 의 `name`), `reservations.tsv` 의 근거 칸은 다른 세션이 정하는 글이라 모델에 넘기는 글에 넣지 않는다. 넣으면 그 글이 `vmq-main` 모델에 지시로 들어가고, `vmq-main` 은 `vmq force-release` 를 부를 수 있다(커밋 `da99dc4` 보안 검토). pane · toast · status line 에는 보이되 줄바꿈 · 제어 문자(C0 · DEL · C1 · U+2028 · U+2029)를 공백으로 바꿔 한 줄로 그린다(`hooks/register.tsx` 의 `oneLine`, pane 은 2026-11-11 사용자 결정) |
-
-설치는 한 번 한다.
-
-```sh
-claude plugin marketplace add ~/.claude/tools/vmq
-claude plugin install vmq-view@vmq --scope user
-```
-
-`mod/vmq-view/` 를 고쳐 main 에 합친 뒤에는 쓰는 세션마다 `/reload-plugins` 를 실행한다. 고친 판은 `.claude-plugin/plugin.json` 의 `version` 을 올리고, `claude plugin validate mod/vmq-view` 로 확인한다.
-
-## 프로젝트에 붙이는 법
-
-1. 대상을 `resources.tsv` 에 적는다. 프로젝트를 가리키는 역할(예: `poieve`)을 하나 붙여 두면 프로젝트 도구가 `vmq_with_role <역할>` 로 자기 대상만 고른다.
-2. 대상을 다루는 스크립트가 `source ~/.claude/tools/vmq/lib/vmq.zsh` 하고 제어 명령 앞에서 `vmq_require <대상>… || exit 1`. 시작할 때 쓸 대상을 모두 확인하면 도중에 거절되어 대상이 반쯤 바뀐 채 남지 않는다. 그 확인이 그 스크립트를 차례에 적으므로, 스크립트가 도는 동안은 한 단계가 길어도 차례가 지워지지 않는다(위 「쥔 프로세스」). 제어 명령을 부르지 않고 VM 을 쥐어야 하는 일(긴 관찰 · 빌드를 기다리는 묶음)은 그 스크립트의 처음에 `vmq_require` 를 부르거나 `vmq run <묶음> -- <명령>` 으로 실행한다.
-3. 차례 없는 읽기 명령을 둘 때는 `source ~/.claude/tools/vmq/lib/peek.zsh` 하고 접속하기 전에 `peek_allowed "<명령 한 줄>"`.
-4. 다른 Mac 에서 자기를 다시 실행하는 스크립트는 그 실행에 `VM_QUEUE_INTERNAL=1` 을 붙인다(이 Mac 에서 이미 확인한 명령의 일부라서). 이 도구는 차례표가 있는 Mac 에만 있으므로 다른 Mac 쪽에서는 `lib/*.zsh` 를 source 하지 않는다. 필요한 대상 목록은 부르는 쪽이 환경 변수로 넘긴다(poieve 는 `VMQ_HOST_LIST`, `tools/lib/common.zsh` 의 `vm_remote_env`). 다른 Mac 에 목록을 따로 두지 않는다. 원본이 둘이 된다. 2026-10-12 에 이것을 빠뜨려 Mac mini 에서 다시 실행한 `tools/vm.sh` 가 종료 코드 127 로 끝났다(poieve 커밋 `cfe273c`, 고친 커밋 `835b4da`).
-5. 도구를 고쳐 그 고침 없이는 대상을 다루면 안 되게 되면(응답 없는 ssh 가 차례를 쥐는 등) 저장소 맨 위 `.vmq-required` 에 그 커밋과 경로를 한 줄 더해 main 에 커밋한다(위 「도구의 판」). poieve 는 `CloudLLM-Claude-code/.vmq-required` 다.
-6. 시험 결과에는 그 대상에 설치된 빌드의 식별값(커밋 · 커밋하지 않은 변경 · 실행 파일 해시)을 함께 적는다. 대상이 여럿이면 대상마다 빌드가 다를 수 있다(아래 「전역 규약」). poieve 의 구현은 `CloudLLM-Claude-code/tools/build.sh` · `vm_install_app`(빌드 표지)이다.
-
-첫 적용: poieve `CloudLLM-Claude-code/tools/lib/common.zsh`(대상 목록에서 `VM_HOST`), `tools/vm.sh`(`vmq_require` · `peek`), `tools/vm-queue.sh`(이 명령을 부르는 입구).
-
-## 하위 세션 지시문에 넣을 것
-
-- 대상을 다루기 전에 `vmq acquire -w 300 -l "<설명>" <묶음>…`(Bash timeout 330000 이상), 75 면 다시 실행. 끝나면 `vmq release`. 상태는 `vmq status`.
-- 차례는 마지막 활동에서 1200초 뒤 지워진다. 긴 묶음 스크립트는 처음에 `vmq_require` 를 불러 두면 그 스크립트가 도는 동안(마지막 제어 명령 · 갱신에서 3600초까지) 지워지지 않는다. 제어 명령 없이 3600초 가까이 기다리는 단계는 그 스크립트가 600초마다 `vmq_keepalive` 를 부른다(poieve 는 `chain_step` 이 부른다). 시작에서 한 번만 `vmq_require` 를 부르고 그 뒤 제어 명령마다 다시 부르지 않는 스크립트(GUI 스크립트 등)는 `vmq_keepalive_or_exit` 를 최상위 셸에서 불러, 차례를 잃으면 대상을 더 다루지 않고 끝나게 한다. 스크립트 없이 명령을 하나씩 부를 때는 20분 넘게 비우지 않는다.
-- 대상의 이전 상태에 기대지 않는 일은 역할(`@server`)로 받고, 기대는 일은 이름으로 받는다.
-- 서버 · 클라이언트를 함께 쓰는 일은 짝으로 받는다: `vmq acquire @server+@client`. `@server @client` 로 따로 받으면 Mac 이 섞일 수 있다. 받은 짝은 「잡음」 줄 · `vmq mine` 에 서버 · 클라이언트 순서로 찍힌다.
-- 상태 확인은 프로젝트의 차례 없는 읽기 명령(poieve 는 `tools/vm.sh peek`)으로 한다.
-- 결과에는 빌드 식별값 줄을 적는다.
-- 「부모의 메시지를 기다려라」 같은 말로 순서를 정하지 않는다. 그 말은 도구가 막지 않는다.
-
-## 시험
-
-전역 vmq 는 살아 있는 checkout(`~/.claude/tools/vmq`)에서 고치지 않는다. 떠 있는 모든 VM 사슬이 vm.sh 를 부를 때마다 그 파일을 source 하므로 반쯤 고친 파일이 바로 적용되고, 같은 파일을 고친 다른 세션의 커밋에 섞여 들어간다(2026-10-23 `318ce43` 에 9ycb6f 의 `vmq_chain_mark` 가 섞임). `git -C ~/.claude/tools/vmq worktree add ~/.claude/tools/vmq-worktrees/<이름>` 의 별도 작업 트리에서 고치고, 그 작업 트리의 `bin/vmq` 로 아래 시험을 돌린 뒤 main 에 합친다.
-
-차례표를 실제 것과 따로 두고 돌린다(`VM_QUEUE_DIR`).
-
-| 시험 | 명령 | 2026-10-12 01:30 결과 |
-|---|---|---|
-| 동시 실행 | `tests/stress.zsh ~/.claude/tools/vmq/bin/vmq /tmp/q /tmp/s.out` | 대상마다 최대 동시 1. 배정에서 「잡거나 배정된 대상은 고르지 않는다」 줄을 지운 복사본은 `PoieveServer` 최대 5 · `PoieveClient` 최대 2 |
-| 읽기 판별 | `tests/peek.zsh` | 42가지 모두 맞음(01:21). 같은 날 `system_profiler` · `ioreg` 를 읽기 목록에 더한 뒤 44가지 모두 맞음. `peek_allowed` 가 늘 통과하는 복사본(poieve 커밋 `b787e7b` 때)은 28가지를 잘못 통과. 02:16 에 절대 경로 · `log` 규칙을 더한 뒤 51가지(읽기 18 · 거절 33) 모두 맞음. 시스템 폴더 검사를 뺀 복사본은 `/tmp/cat x` · `/usr/bin/../../tmp/log show` 를, `PEEK_SHELL_BUILTINS` 를 비운 복사본은 `log show --last 1m` 을 잘못 통과. 이때 동시 실행 시험도 다시 돌려 대상마다 최대 동시 1. poieve `tools/vm.sh peek PoieveServer "/usr/bin/log show …"` 는 VM 에서 실행되어 종료 코드 0, `'log show --last 1m'` 은 접속 전에 종료 코드 1 |
-| 옛 형식 차례표 · 후보 · 바꿈 · 놓음 · 모르는 대상 · 역할 | 실제 차례표의 복사본으로 `acquire` · `release` · `vmq_require` | 옛 차례가 새 형식으로 이어지고, `@server` 가 빈 `PoieveServer2` 를 받고, 바꿈이 순번을 지키고, 모르는 이름 · 역할은 종료 코드 1 |
-| 쥔 프로세스 · 상한 | `tests/keepalive.zsh ~/.claude/tools/vmq/bin/vmq /tmp/qk` | 2026-10-16 01:1x: 9가지 모두 맞음(두 번). `VM_QUEUE_LEASE=5` 로 ① 쥔 프로세스가 없으면 7 ~ 8초 뒤 만료 ② `vmq_require` 를 부른 프로세스가 살아 있는 동안 9초 기다려도 받지 못함 ③ 그 프로세스가 끝난 뒤 3초에 만료 ④ `VM_QUEUE_HOLD_MAX=4` 면 프로세스가 살아 있어도 10 ~ 11초 뒤 만료되고 `log` 에 「상한 4초」 ⑤ PID 는 살아 있고 시작 시각이 다르면 붙들지 않음 ⑥ `vmq run` 의 명령이 도는 동안 받지 못하고 끝나면 0초에 받음. 깬 복사본 네 개는 각자의 시험에서 실패했다: 살아 있음 판정이 늘 거짓 → ② · ⑥, 상한 비교를 뺌 → ④, 시작 시각 비교를 빼고 PID 만 봄 → ⑤, `run` 이 자기를 적지 않음 → ⑥. 처음 `VM_QUEUE_LEASE=3` 으로는 기다리는 쪽이 2초마다 다시 적는 자기 차례가 만료되는 일이 생겨(시험용 `log` 의 「만료 … B」) 5초로 늘렸다. 같은 판으로 동시 실행 시험은 대상마다 최대 동시 1, 읽기 판별 시험은 51가지 모두 맞음. 2026-10-16 14:3x PDT(qdniti): ⑦ 쥔 프로세스를 `TZ=Asia/Seoul LC_ALL=ko_KR.UTF-8` 로 적고 `TZ=America/Los_Angeles LC_ALL=C` 로 기다리면 9초 동안 받지 못하고, 그 프로세스가 끝나면 받음. 11가지 모두 맞음. `LC_ALL=C TZ=UTC` 를 뺀 깬 복사본은 ⑦ 의 첫째에서 실패(기대 75, 실제 0). 같은 판으로 동시 실행 최대 1, 읽기 판별 51가지 모두 맞음 |
-| 짝 단위 후보 | `tests/pair.zsh ~/.claude/tools/vmq/bin/vmq /tmp/qp`(시험용 대상 목록 S1 · C1 · S2 · C2 를 그 폴더에 만든다) | 2026-10-17 05:xx PDT: 15가지 모두 맞음. ① 소유자 아홉 개 동시 `run`(짝 여섯 · `@server` 셋)에서 대상마다 최대 동시 1 ② 짝 여섯 개 모두 같은 Mac 의 서버 · 클라이언트(섞인 짝 0) ③ 한 짝을 잡은 동안 다른 짝을 바로 받음 ④ 두 짝이 잡힌 동안 75, 놓으면 받음 ⑤ 짝의 클라이언트만 잡힌 동안 그 짝을 받지 않음. 깬 복사본 두 개는 각자의 시험에서 실패했다: 후보의 첫 대상만 비었는지 봄 → ⑤ 둘, 같은 Mac 거르기를 뺌(`S1+C2` 등이 후보) → ② · ⑤. 같은 판으로 동시 실행 대상마다 최대 동시 1, 읽기 판별 51가지, 쥔 프로세스 11가지 모두 맞음 |
-| run 의 신호 | `tests/run-signal.zsh ~/.claude/tools/vmq/bin/vmq /tmp/qr`(시험용 대상 목록 S1 · S2 를 그 폴더에 만든다) | 2026-10-23 20:5x PDT: 6가지 모두 맞음. ① 그룹 TERM 뒤 2초에 놓임 ② `vmq run` 에만 TERM 이면 명령(`sleep 5`)이 도는 동안 쥐고 TERM 뒤 5.1초에 놓임 ③ 그룹 KILL 뒤에는 남음 ④ 기다리던 중 TERM 이면 요청이 지워져 배정되지 않음. 고치기 전 판(`e69278b`)은 ① · ② 의 둘째 · ④ 의 둘째 세 가지가 틀림. 같은 판으로 동시 실행 최대 1, 읽기 판별 51가지, 쥔 프로세스 · 상한 11가지 모두 맞음 |
-| 활동 갱신 | 시험 파일은 두지 않았다(전역 규약 §16). 확인 뒤 지운 임시 스크립트로 시험용 대상 목록(T1) · 시험용 차례표 · `VM_QUEUE_LEASE=5` · `VM_QUEUE_HOLD_MAX=60`(갱신 간격 10초)을 주고, 소유자 A 의 사슬 셸이 `vmq_require` 뒤 poieve `chain_step 130 sleep 120` 을 도는 동안 소유자 B 가 `acquire -w 100` 했다 | 2026-10-28 11:3x PDT(poieve `task_1793209230273_b2regj`). 고친 판: B 는 101초 기다려 75, 95초 시점 `vmq status` 「마지막 제어 명령 · 갱신 5초 전, 상한 60초」, 사슬 셸이 끝난 뒤 B 가 1초에 받음, 다른 소유자 B 와 차례에 적히지 않은 A 프로세스의 `vmq_keepalive` 는 둘 다 1 이고 `active` 가 그대로. 깬 복사본 두 개: `chain_step` 의 갱신을 뺌 → 사슬 셸이 살아 있는데 log 「만료 T1 A (… 프로세스 … 는 살아 있지만 마지막 제어 명령 · 갱신에서 상한 60초가 지났다)」, B 가 62초에 받음 / `vmq_keepalive` 의 procs 확인을 뺌 → 차례에 적히지 않은 A 프로세스의 갱신이 0 이고 `active` 가 바뀜. 같은 판으로 동시 실행 대상마다 최대 동시 1, 읽기 판별 51가지, 쥔 프로세스 · 상한 11가지 모두 맞음 |
-| 끝난 사슬의 차례 | 시험 파일은 두지 않았다(전역 규약 §16). 임시 스크립트로 시험용 차례표 · `VM_QUEUE_LEASE=5`(⑥ 만 30) · 대상 `MiniDesktop`(`vmq list` 의 첫 대상)을 주었다. 끝난 사슬은 소유자 A 가 받은 뒤 `zsh -c` 로 `lib/vmq.zsh` 를 source 해 `vmq_chain_mark $$ MiniDesktop` 을 부르고 끝난 셸로 만들었다. ① A 의 `acquire -w 20` ② 다른 소유자 B 의 `acquire -w 14` 가 먼저 기다리는 동안 A 의 `acquire -w 12` ③ 사슬 셸이 살아 있는 동안 A 의 `acquire -w 5` ④ 사슬은 끝났고 `vmq_require` 를 부른 A 의 다른 프로세스가 13초 뒤 `vmq release` 하는 동안 A 의 `acquire -w 9`, 이어서 `acquire -w 12` ⑤ A 의 `acquire -w 15` 가 기다린 지 2초 뒤 A 가 `vmq release` ⑥ A 의 `acquire -w 8` 이 기다리는 동안 차례 파일의 수정 시각을 4초 간격으로 두 번 읽음 ⑦ A 의 `vmq run MiniDesktop -- true` | 2026-11-11 15:47 ~ 15:53 UTC. 고친 판: 34가지 모두 맞음. ① 6.2초에 종료 코드 0, `log` 의 사건 순서가 등록 · 잡음 · 사슬 · 만료 · 등록 · 잡음이고 새 차례의 일련번호 2 ② B 가 6.3초에 0, 그때 `vmq status` 가 「잡음 B」 · 「대기 1: A」(A 의 새 일련번호 3, B 는 2), B 가 놓은 뒤 A 가 0 ③ 0.1초에 0 이고 새 등록 없음 ④ 10.3초에 75 이고 `log` 에 만료 없음 · 일련번호 그대로, 그 프로세스가 놓은 뒤 2.1초에 0 이고 일련번호 2 ⑤ `vmq release` 뒤 0.1초에 0 ⑥ 수정 시각 차이 0초, 8.3초에 75 ⑦ 6.3초에 0, 사건 순서가 등록 · 잡음 · 사슬 · 만료 · 등록 · 잡음 · 놓음. 고치기 전 판(`ff27925`)은 14가지가 틀림: ① 20.6초에 75 이고 만료 없음(다섯 가지) ② B 가 14.7초에 75, A 가 12.6초에 75(여섯 가지) ⑥ 수정 시각 차이 4초(한 가지) ⑦ 12초 안에 끝나지 않아 TERM 을 보냄(두 가지). ③ ④ ⑤ 는 두 판에서 같음. 고치기 전 `bin/vmq` 와 고친 `lib/vmq.zsh` 를 함께 둔 복사본은 고치기 전 판과 같은 14가지가 틀리고(맞음 · 틀림 줄이 고치기 전 판과 같음), 동시 실행 대상마다 최대 동시 1, 쥔 프로세스 · 상한 11가지, 짝 15가지, run 의 신호 6가지 모두 맞음. 고친 판으로 동시 실행 대상마다 최대 동시 1, 읽기 판별 51가지, 쥔 프로세스 · 상한 11가지, 짝 15가지, run 의 신호 6가지 모두 맞음 |
-| 끝난 사슬의 차례 조회 | 시험 파일은 두지 않았다(전역 규약 §16). 임시 스크립트로 시험용 차례표 · `VM_QUEUE_LEASE=6` · `VM_QUEUE_HOLD_MAX=3600` · 대상 `MiniDesktop` 을 주었다. ① 사슬 셸이 끝난 A 의 차례에서 A 가 2초마다 `vmq mine` 과 `vmq_chain_of`(`lib/vmq.zsh` 를 source 한 zsh)를 부르는 동안 다른 소유자 B 가 `acquire -w 20` ② 대조군: 사슬 셸이 살아 있는 A 의 차례에서 같은 조회와 B 의 `acquire -w 16` ③ 사슬 셸은 끝났고 `vmq_require` 를 부른 A 의 다른 프로세스가 살아 있는 차례에서 B 의 `acquire -w 14` 와 그 차례의 `vmq_require`. 수정 시각은 `stat -f %Fm` 으로 읽었다 | 2026-11-11 17:20 ~ 17:21 UTC. 고친 판: 34가지 모두 맞음. ① `vmq mine` · `vmq_chain_of` 가 그 차례 파일의 수정 시각을 바꾸지 않았고, 사슬을 적은 시각에서 LEASE + 4초 안에 차례가 만료되어(`log` 「만료 MiniDesktop A」) B 가 0 ② 부를 때마다 수정 시각이 새로 적혀 LEASE 의 두 배가 지나도 차례가 남았고 B 는 75 ③ 그 프로세스가 살아 있는 동안 `vmq_purge` 의 holdMax 판정으로 차례가 남았고 B 는 75, `vmq_require` 는 0 이고 `active` 를 새로 적음. 고치기 전 판(main `564311c` 의 복사본)은 ① 의 8가지가 틀림: `vmq mine` · `vmq_chain_of` 가 수정 시각을 각각 10번 새로 적어 차례가 만료되지 않았고 B 가 75 |
-| 거절된 활동 갱신 | 시험 파일은 두지 않았다. 임시 스크립트 두 개로 시험용 차례표를 주었다. 첫째는 `VM_QUEUE_LEASE=60`(③ 만 6) · `VM_QUEUE_HOLD_MAX=4` · 대상 `MiniDesktop` · `PoieveClient` 로, `vmq_keepalive` 를 부르기 전에 차례 파일의 수정 시각을 `touch -t` 로 20초 앞으로 되돌려 두고 부른 뒤 내용(`md5 -q`)과 수정 시각을 비교했다. ① A 가 두 대상을 잡고 B 가 `MiniDesktop` 을 기다리는 동안 procs 에 없는 A 의 셸 · B 의 셸 · 차례가 없는 C 의 셸이 부름 ② A 의 셸이 `vmq_require` 로 procs 에 적힌 뒤 그 셸이 소유자 B 로 부름 · procs 에 없는 A 의 다른 셸 · `VM_QUEUE_TICKET` 이 다른 키인 셸, 대조군(procs 에 있는 셸 · `vmq ticket` 의 키로 고정한 셸), 위 「활동 갱신」 이 적은 예외 두 가지(procs 의 셸이 살아 있고 상한 안인 차례, 배정된 대기 차례) ③ 10초 동안 거절만 되풀이한 차례. 둘째(검증 뒤 확인 스크립트의 B 절)는 `VM_QUEUE_LEASE=10` 으로 배정된 대기 차례 · 잡힌 차례에서 `vmq ticket`, 배정된 대기 차례 · 쥔 프로세스가 살아 있는 차례에서 procs 에 없는 셸의 `vmq_keepalive` | 2026-11-11 17:21 UTC(첫째) · 17:36 UTC(둘째). 고친 판: 첫째 62가지 모두 맞음. 거절은 모두 1 이고 차례 파일의 내용 · 수정 시각이 그대로, 대조군은 0 이고 `active` 가 새로 적힘, 예외 두 가지에서는 거절이어도 `vmq_purge` 가 수정 시각을, `vmq_commit` 이 `held` 줄을 적음, ③ 의 차례는 만료됨. 둘째 12가지 모두 맞음: 배정된 대기 차례에서는 `vmq ticket` · 거절된 `vmq_keepalive` 둘 다 `held` 줄과 `log` 「잡음」 을 남기고, 잡힌 차례에서 `vmq ticket` 은 수정 시각을 바꾸지 않고, 쥔 프로세스가 살아 있는 차례에서는 거절이어도 수정 시각이 새로 적힘. 고치기 전 판은 첫째 10가지가 틀림: 거절이어도 부른 소유자 차례의 수정 시각을 새로 적음(4가지), `VM_QUEUE_TICKET` 이 다른 키여도 0 이고 내용 · 수정 시각이 바뀌고 stderr 에 고정한 키가 없음(4가지. 이 판에는 차례 고정이 없다), ③ 의 차례가 만료되지 않음(2가지). 둘째는 `vmq ticket` 이 없어 5가지가 틀림 |
-| 갱신 실패의 종료 코드 | 시험 파일은 두지 않았다(전역 규약 §16). 임시 스크립트 하나로 시험용 차례표(`VM_QUEUE_DIR` 을 `mktemp -d`) · 대상 `MiniDesktop` 을 주었다. A 잡고 `vmq_require` 한 셸 · B 같은 소유자의 procs 에 없는 셸 · C 차례 없는 소유자 · D 기다리는 차례 · E `vmq_require` 한 셸에서 `.mutex` 디렉터리를 만들고 1초마다 `touch -c` 로 30초 넘게 쥠 · F1 E 상태에서 `vmq_keepalive_or_exit` 뒤 다음 줄로 가는가 · F2 C 의 소유자가 최상위에서 `vmq_keepalive_or_exit` 뒤 다음 줄 · F3 같은 것을 `( )` 안에서 | 2026-11-13 UTC. 고친 판: A 0 이고 `active` 가 새로 적힘 · B · C · D 1 이고 stderr 에 각 이유 · E 75 · F1 다음 줄로 감(0) · F2 종료 코드 1, 다음 줄 없음 · F3 서브셸만 끝나 다음 줄로 감(바깥 0). 고치기 전 판(`d87ac18` 의 `lib/vmq.zsh`): B · C · D 1 이고 stderr 빈 값, E 1(잠금 메시지만), F1 ~ F3 은 함수가 없음 |
-| 차례 고정 | 시험 파일은 두지 않았다. 임시 스크립트 세 개로 시험용 차례표를 주었다. 첫째는 `VM_QUEUE_LEASE=60`((b2) 만 4) · `VM_QUEUE_HOLD_MAX=60` · 대상 `vmq list` 의 첫째 · 둘째 줄로 (a) `vmq ticket` (b) 강제로 놓음 뒤 같은 소유자가 새로 받은 차례에 옛 키로 `vmq_require` · `vmq_chain_of` · `vmq_chain_mark` · `vmq mine` · `vmq_keepalive` · `vmq release` (b2) 만료 뒤 옛 키로 `vmq release` · `vmq_require` (c) 지금 키로 고정 (d) 변수 없음 (e) 바깥에 옛 키가 있는 채로 `vmq run` · 다른 명령 (f) `set -euo pipefail` 로 `lib/vmq.zsh` 를 source 해 `vmq_require` 를 부르는 자식 zsh 에 물려지는가. (c) · (d) 는 호출 기록을 남겨 두 판에서 대조했다. 둘째(검증 뒤 확인 스크립트의 C 절)는 poieve `tools/lib/common.zsh` 의 `vm_chain_watch` 와 같은 순서로 vmq 를 부르고 위 「차례 고정」 의 ① · ② 에서 고정하는 감시 스크립트다(`tools/vm.sh` 는 `vmq_require` 를 부르는 자식 zsh 로 대신했다). `VM_QUEUE_LEASE=10` 으로 여섯 가지 경우를 보았다: C1 사슬이 사는 동안 옛 차례가 만료되고 같은 소유자가 사슬 없이 새로 받음 · C2 아무도 받지 않음 · C3 다른 소유자가 먼저 기다림 · C4 같은 소유자가 다른 대상을 잡음 · C5 사슬이 놓지 않고 끝남 · C6 사슬이 스스로 놓음. 옛 차례는 `active` 와 수정 시각을 되돌려 만료로 지웠다. 강제로 놓음으로 지우지 않은 까닭은 `vmq ended` 가 「강제로 놓음」 줄을 찾지 못하고 종료 코드 1 을 내기 때문이다(이 판에서 고치지 않았다). 셋째는 고정하는 곳 두 곳(감시가 처음 `vmq_require` 한 직후 · `vmq_chain_of` 대조 뒤)을 같은 경우(옛 차례가 강제로 놓음으로 지워진 뒤 같은 소유자가 새 차례를 받음)에서 비교했다 | 2026-11-11 17:21 ~ 17:38 UTC. 고친 판: 첫째 96가지 모두 맞음, (c) · (d) 의 호출 기록이 고치기 전 판과 같음(2가지). 둘째 12가지 모두 맞음: C1 감시가 정리하지 않음(종료 코드 20) · C2 다시 받아 정리하고 놓음 · C3 다시 받지 못해 등록을 지우고 B 의 차례가 남음 · C4 다시 받기가 1 이라 등록을 지우는 분기로 가고 같은 소유자가 잡은 `PoieveClient2` 차례가 남음 · C5 정리하고 놓음 · C6 사슬이 놓은 것으로 봄. 고정하는 곳을 바꾼 감시 스크립트 네 가지는 각자의 경우에서 틀림(17:30 ~ 17:35 UTC): `vmq_chain_of` 대조 뒤 고정 → C1 의 2가지 · C4 / 고정하지 않음 → C1 의 2가지 · C4 / 다시 받은 뒤 고정하지 않음 → C2 의 2가지 · C3 / 다시 받은 뒤 종료 코드와 상관없이 고정 → C4. 셋째: 대조 뒤 고정하면 옛 감시가 새 차례에 적용되어 새 차례 파일이 지워졌고(2가지 틀림), 처음 `vmq_require` 직후 고정하면 감시가 종료 코드 8 로 끝나고 새 차례가 남음. 고치기 전 판은 `vmq ticket` 이 없고 `VM_QUEUE_TICKET` 을 보지 않아 첫째 57가지((a) 10 · (b) 30 · (b2) 3 · (e) 1 · (f) 13), 둘째 3가지(C1 의 2가지 · C4)가 틀림 |
-| 차례 단위 만료 | 시험 파일은 두지 않았다. 임시 스크립트 두 개로 시험용 차례표 · `VM_QUEUE_LEASE=10` · 대상 `vmq list` 에서 같은 Mac 의 앞 두 개(`MiniDesktop` · `PoieveClient2`)를 주고, 두 대상을 함께 잡은 차례의 파일 수정 시각을 `touch -t` 로 따로 정했다. 첫째는 열 가지 경우다: 한 파일만 LEASE 를 넘음(`vmq status` 문장 · `--json` · 묶음 두 개로 받은 차례) · 둘 다 넘음(문장 · `--json`) · `vmq run` 이 procs 를 적음 · procs 가 한 파일에만 적힘(두 가지 경우) · 전의 `vmq_purge` 가 남긴 차례(앞 대상의 파일이 없음) · 두 파일의 수정 시각이 1초 다름. 둘째(검증 뒤 확인 스크립트의 A 절)는 한 파일만 30초 전일 때 `vmq status` 의 두 대상 줄과 `--json` 의 `expiry`, 둘 다 넘었을 때(30초 · 15초 전) `log` 만료 줄의 N, 한 파일에만 살아 있는 프로세스가 적혔을 때의 문장을 보았다 | 2026-11-11 17:22 UTC(첫째) · 17:36 UTC(둘째). 고친 판: 첫째 73가지 모두 맞음. 한 파일만 넘으면 두 파일이 남고 `status` 가 두 대상 모두 A 가 잡았다고 찍음, 둘 다 넘으면 함께 지워지고 `log` 만료 줄 두 줄 · `vmq ended` 가 두 대상 모두 「만료 <시각> -」, procs 가 한 파일에만 있어도 두 파일 모두 수정 시각이 새로 적힘, 앞 대상의 파일이 없어도 `status` · `--json` 이 0. 둘째 14가지 모두 맞음: 두 대상 줄의 만료까지 초가 같은 양수(10 · 10)이고 `--json` 도 10, 만료 줄 두 줄의 N 이 같고 가장 최근 파일의 값(15 · 15), 두 줄 모두 holdMax 문장. 고치기 전 판: 첫째 23가지가 틀림(한 파일만 넘으면 그 파일만 지워 `status` 가 `Q_exp[4]: parameter not set` 으로 종료 코드 1, 전의 차례에서 `zstat` · 산술 오류, procs 가 없는 파일만 지움). 앞서 같은 시나리오를 돌렸을 때는 25가지였다. 두 파일의 수정 시각이 1초 다른 경우는 초 경계에 따라 결과가 갈린다. 둘째 8가지가 틀림(만료 줄 N 이 30 · 15). 깬 복사본 두 개(17:30 ~ 17:38 UTC): `vmq status` 문장만 파일 단위 `vmq_expiry` 로 되돌림 → 두 대상 줄이 -20 · 10 이고 `--json` 과 다르고 holdMax 문장이 한 줄(4가지 틀림) / `--json` 만 되돌림 → `--json` 이 -20, 문장이 10(1가지 틀림) |
-| acquire 기한 | 시험 파일은 두지 않았다. 임시 스크립트로 시험용 차례표 · `VM_QUEUE_LEASE=20` · `VM_QUEUE_HOLD_MAX=120` 을 주고, 같은 소유자 A 의 끝난 사슬이 쥔 차례(`register_wait` 단계)와 다른 소유자 B 가 잡은 차례(`hold` 단계)를 거치게 했다. S1 끝난 사슬의 차례가 만료되고 먼저 기다리던 B 가 받음, `acquire -w 12` · S2 끝난 사슬의 차례를 놓은 뒤 B 가 잡고 있음, `acquire -w 6` · S3 기한이 지난 뒤의 한 번 확인에서 잡음, `acquire -w 6` · S4 두 단계를 거쳐 잡음, `acquire -w 40` · S5 대조군: `vmq run -w 3`(기한이 없다) · S6 한 단계만 거침(다른 소유자가 잡음 · 끝난 사슬의 차례), `acquire -w 6` | 2026-11-11 17:22 ~ 17:24 UTC. 고친 판: 34가지 모두 맞음. S1 12.5초 · S2 6.3초에 75(N + 3초 안), S3 6.2초에 0, S4 16.6초에 0, S5 16.8초에 0 이고 명령이 실행됨, S6 6.4 · 6.2초에 75. 고치기 전 판은 2가지 틀림: S1 20.7초 · S2 12.5초(두 단계가 -w 초를 따로 세었다). 이 다섯 줄의 고친 판으로 동시 실행 대상마다 최대 동시 1(구간 13개), 읽기 판별 51가지, 짝 15가지, run 의 신호 6가지, 쥔 프로세스 · 상한 11가지, 끝난 사슬의 차례 34가지 모두 맞음(17:27 ~ 17:30 UTC) |
-| vmq ended 강제로 놓음 | 시험 파일은 두지 않았다. 시험용 차례표에서 소유자 A 가 `acquire` 한 뒤 소유자 Z 가 `force-release` 하고 A 가 `vmq ended` 를 부른다. 경우 여섯 가지: 대상 한 개 강제로 놓음 · 대상 두 개 차례의 한 대상을 강제로 놓음(두 대상 각각) · `release` · 강제로 놓은 뒤 B 가 잡음 · 다른 소유자 C 의 `ended` | 2026-11-11 20:06 UTC: 고친 판은 강제로 놓은 네 경우가 `강제로놓음 <시각> -`(B 가 잡은 경우 `B`)이고 종료 코드 0, `release` 는 `놓음`, C 는 종료 코드 1. 고치기 전 판(564311c)은 강제로 놓은 네 경우가 모두 종료 코드 1 이었다(macOS awk 의 `substr` 이 바이트 단위라 `(요청` 대조가 늘 거짓) |
-| Doghoodie 탭의 소유자 | 시험 파일은 두지 않았다. vmq-main 세션(`sessionId` `f5253caa-…`)의 Doghoodie 탭 `cc-f5253caa/q`(터미널 32, `VM_QUEUE_OWNER` · `CLAUDE_CODE_SESSION_ID` 없음)에서 시험용 차례표(`VM_QUEUE_DIR`)로 ① `acquire MiniDesktop -w 5` 뒤 `status` · `status --json` 의 `owner` · `release` ② `VM_QUEUE_OWNER=manual-x` 를 준 `acquire` ③ `DOGHOODIE_TERMINAL=2`(이름 `cc-894fc1c9`, 살아 있는 세션 없음) ④ `DOGHOODIE_TERMINAL=99999`(없는 터미널) ⑤ `DOGHOODIE_TERMINAL` 을 지움 ⑥ `claude agents --json` 이 `f5253caa` 로 시작하는 `sessionId` 두 개를 찍는 가짜 `claude` 를 PATH 앞에 둠 ⑦ `lib/vmq.zsh` 를 source 한 `zsh -c` 의 `vmq_owner` | 2026-11-15 UTC. 고친 판: ① 0.6초에 종료 코드 0, 소유자 · `owner` · 차례 키가 `f5253caa-a76c-469b-a83a-4d5b287b087e`, `release` 0 ② 소유자 `manual-x` ③ 「살아 있는 Claude Code 세션이 0개다」 1 ④ 「cc-<세션 id 앞 8자리> 꼴이 아니다: 없음」 1 ⑤ 「소유자가 없다」 1 ⑥ 「2개다」 1 ⑦ 같은 id. 고치기 전 main 판(`d55a263`)은 ① 이 「소유자가 없다」로 1(카드 세션이 겪은 것과 같다). 「1개여야 한다」 검사를 `>= 1` 로 바꾼 깬 복사본은 ⑥ 에서 가짜 id 로 0 이었다. 같은 판으로 동시 실행 대상마다 최대 동시 1(구간 13개), 짝 15가지, 쥔 프로세스 · 상한 11가지 모두 맞음 |
-
-큐나 판별을 바꾸면 위 시험을 다시 돌리고, 바꾼 자리를 일부러 깬 복사본에서 시험이 실패하는 것을 본 뒤 복사본을 지운다(전역 규약 §8 ③).
+MIT

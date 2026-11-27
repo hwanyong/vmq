@@ -1,0 +1,5 @@
+# Types the Claude Code engine writes for the editor when it loads the mod
+.claude-plugin/types/
+# Claude Code session files
+.claude/scheduled_tasks.lock
+.claude/worktrees/

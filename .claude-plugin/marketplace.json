@@ -1,13 +1,13 @@
 {
   "name": "vmq",
+  "description": "vmq: a control queue for VMs, devices and screens shared by Claude Code sessions",
   "owner": {
-    "name": "UHD"
+    "name": "hwanyong"
   },
-  "description": "vmq 제어 큐를 Claude Code 안에 보이는 mod",
   "plugins": [
     {
-      "name": "vmq-view",
-      "source": "./mod/vmq-view"
+      "name": "vmq",
+      "source": "./"
     }
   ]
 }

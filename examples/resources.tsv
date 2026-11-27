@@ -1,0 +1,13 @@
+# vmq target list. Copy to ~/Library/Application Support/vmq/resources.tsv (or set VMQ_REGISTRY) and edit.
+# One target per line, tab-separated: <name>	<SSH address of the Mac the target is on>	<roles, comma-separated>	<operating system>
+# The operating system is the one running inside the target (macOS, Windows, Linux), or - for a target with none (a build slot).
+# A role names a group of targets: `vmq acquire @server` takes whichever target with role server is free first.
+# `@server+@client` takes a server and a client on the same Mac (same second column).
+TestServer	mac-a.local	server,myproject	macOS
+TestClient	mac-a.local	client,myproject	macOS
+TestServer2	mac-b.local	server,myproject	macOS
+TestClient2	mac-b.local	client,myproject	macOS
+Desktop	mac-a.local	desktop	macOS
+# Build slots: the number of lines is how many builds may run at once (`vmq run @build -- make`).
+Build1	mac-a.local	build	-
+Build2	mac-a.local	build	-
